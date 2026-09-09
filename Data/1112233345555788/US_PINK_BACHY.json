@@ -1,0 +1,21 @@
+{
+	"directoryName":"US-PINK-BACHY",
+	"instrumentType":"3",
+	"market":"PINK",
+	"marketCode":"13",
+	"marketType":"2",
+	"quoteLevelType":"2",
+	"region":"US",
+	"secuCode":"BACHY",
+	"secuMarket":"35",
+	"securityCategory":"ADR",
+	"stockCode":"BACHY",
+	"stockId":"214637",
+	"stockName":"中国银行(ADR)",
+	"stockType":"ADR",
+	"subInstrumentType":"3",
+	"symbol":"[TODO]",
+	"type":"2",
+	"urlMinuteQuote":"https://www.futunn.com/quote-api/quote-v2/get-quote-minute?stockId=214637&marketType=2&type=2&marketCode=13&instrumentType=3&subInstrumentType=3&_=",
+	"urlStockCode":"BACHY-US"
+}

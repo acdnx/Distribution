@@ -1,0 +1,19 @@
+{
+	"directoryName":"HK-HK-HSIMain",
+	"instrumentType":"10",
+	"market":"HK",
+	"marketCode":"114",
+	"marketType":"1",
+	"quoteLevelType":"2",
+	"region":"HK",
+	"secuCode":"HSIMain",
+	"secuMarket":"21",
+	"securityCategory":"FutureIndex",
+	"stockCode":"HSIMain",
+	"stockId":"71000662",
+	"stockName":"恒生指数主连",
+	"subInstrumentType":"23",
+	"type":"2",
+	"urlMinuteQuote":"https://www.futunn.com/quote-api/quote-v2/get-quote-minute?stockId=71000662&marketType=1&type=2&marketCode=114&instrumentType=10&subInstrumentType=23&_=",
+	"urlStockCode":"HSIMAIN-HK"
+}

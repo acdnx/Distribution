@@ -1,0 +1,19 @@
+{
+	"directoryName":"US-US-SPX",
+	"instrumentType":"6",
+	"market":"US",
+	"marketCode":"24",
+	"marketType":"2",
+	"quoteLevelType":"2",
+	"region":"US",
+	"secuCode":"SPX",
+	"secuMarket":"30",
+	"securityCategory":"StockIndex",
+	"stockCode":"SPX",
+	"stockId":"200003",
+	"stockName":"标普500指数",
+	"subInstrumentType":"0",
+	"type":"2",
+	"urlMinuteQuote":"https://www.futunn.com/quote-api/quote-v2/get-quote-minute?stockId=200003&marketType=2&type=2&marketCode=24&instrumentType=6&subInstrumentType=0&_=",
+	"urlStockCode":".SPX-US"
+}

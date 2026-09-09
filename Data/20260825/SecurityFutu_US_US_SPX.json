@@ -1,0 +1,19 @@
+{
+  "request" : {
+    "function_name" : "FSQDCQuoteFetcherFutu",
+    "invocation_type" : "Async",
+    "qualifier" : "LATEST",
+    "client_context" : "{\"code\":2001,\"data\":{\"scheduleKey\":\"US_US_SPX\",\"securityKey\":\"US_US_SPX\",\"scheduleArn\":\"OSS://COS:ap-cq:cq:Finv/FSQDCSchedule/SecurityFutu_US_US_SPX.json\",\"metadataArn\":\"OSS://COS:ap-cq:cq:Finv/QuoteProviderFutu/US_US_SPX.json\",\"metadataUri\":\"file:///tmp/QuoteProvider/US_US_SPX.json\"},\"source\":\"1001\"}",
+    "log_type" : null,
+    "namespace" : "Finv",
+    "routing_key" : "{\"key\":\"value\"}",
+    "async_delay" : null
+  },
+  "invoke_gap_second" : 1000,
+  "last_exec_ts" : 1777745485658,
+  "ttd" : 48,
+  "retry_type" : 3,
+  "begin_ts" : 1777747285658,
+  "end_ts" : 1777831885658,
+  "key" : "2002:US_US_SPX:20260503"
+}

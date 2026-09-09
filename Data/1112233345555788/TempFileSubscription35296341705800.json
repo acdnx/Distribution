@@ -1,0 +1,26 @@
+{
+	"booster":null,
+	"data":null,
+	"feed_ids":null,
+	"feeds":null,
+	"list_ids":null,
+	"lists":null,
+	"uids":null,
+	"zz":{
+		"content_code":1020,
+		"content_key":"GMOqWf4xiMDfiOZcC7dtK",
+		"gmt_update":"2026-04-01 23:38:18.521829200",
+		"method":"GET",
+		"ord_str":"202604012338176588961020",
+		"origin_json":"null",
+		"partation":null,
+		"process_date":20260401,
+		"request_body":null,
+		"response_date_time":"2026-04-01 23:38:18.521829200",
+		"serialization_class":"List<Subscription>",
+		"status_code":3,
+		"status_msg":"`userId`: Invalid Snowflake ID",
+		"ts":"20260401233817658896",
+		"url":"https://api.follow.is/subscriptions?userId=GMOqWf4xiMDfiOZcC7dtK"
+	}
+}

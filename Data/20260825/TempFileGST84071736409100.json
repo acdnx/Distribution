@@ -1,0 +1,15 @@
+{
+	"region":"US",
+	"market":"COMEX",
+	"security_code":"GC26J",
+	"security_name":"黄金主连",
+	"security_type":null,
+	"market_type":"us",
+	"is_index":false,
+	"is_bk":false,
+	"is_block":false,
+	"is_futures":true,
+	"is_stock":false,
+	"all":"1",
+	"group":"quotation_futures_fiveday"
+}

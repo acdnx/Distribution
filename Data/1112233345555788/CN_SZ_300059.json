@@ -1,0 +1,19 @@
+{
+	"directoryName":"CN-SZ-300059",
+	"instrumentType":"3",
+	"market":"SZ",
+	"marketCode":"35",
+	"marketType":"4",
+	"quoteLevelType":"2",
+	"region":"CN",
+	"secuCode":"300059",
+	"secuMarket":"12",
+	"securityCategory":"StockIndex",
+	"stockCode":"300059",
+	"stockId":"63075892009115",
+	"stockName":"东方财富",
+	"subInstrumentType":"0",
+	"type":"2",
+	"urlMinuteQuote":"https://www.futunn.com/quote-api/quote-v2/get-quote-minute?stockId=63075892009115&marketType=4&type=2&marketCode=35&instrumentType=3&subInstrumentType=0&_=",
+	"urlStockCode":"300059-SZ"
+}

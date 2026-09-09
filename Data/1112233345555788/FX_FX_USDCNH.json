@@ -1,0 +1,19 @@
+{
+	"directoryName":"FX-FX-USDCNH",
+	"instrumentType":"11",
+	"market":"FX",
+	"marketCode":"120",
+	"marketType":"11",
+	"quoteLevelType":"2",
+	"region":"FX",
+	"secuCode":"USDCNH",
+	"secuMarket":"100",
+	"securityCategory":"Currency",
+	"stockCode":"USDCNH",
+	"stockId":"72000013",
+	"stockName":"美元/离岸人民币",
+	"subInstrumentType":"0",
+	"type":"2",
+	"urlMinuteQuote":"https://www.futunn.com/quote-api/quote-v2/get-quote-minute?stockId=72000013&marketType=11&type=2&marketCode=120&instrumentType=11&subInstrumentType=0&_=",
+	"urlStockCode":"USDCNH-FX"
+}
