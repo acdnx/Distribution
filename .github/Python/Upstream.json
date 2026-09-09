@@ -1,5 +1,5 @@
 {
-  "TargetBranch": "test",
+  "TargetBranch": "dev",
   "BranchMigration": "Migration",
   "BranchCurrent": "dev",
   "UploadFileListPath": "Branch/dev/UploadFileList_20260909_152000720_5CFCDECD3FE345B2995AE398DCF3D606.txt",
