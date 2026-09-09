@@ -1,10 +1,10 @@
 {
-  "TargetBranch": "test",
+  "TargetBranch": "quote",
   "BranchMigration": "Migration",
-  "BranchCurrent": "dev",
-  "UploadFileListPath": "Branch/dev/UploadFileList_20260909_152000720_5CFCDECD3FE345B2995AE398DCF3D606.txt",
+  "BranchCurrent": "quote",
+  "UploadFileListPath": "Branch/quote/UploadFileList_20260909_152000720_5CFCDECD3FE345B2995AE398DCF3D606.txt",
   "OBSCIDRoutes": [
-    { "FilePrefix": "UpStream/Archive/20260825/HK_HKEX_", "CID": "3501806882199176893" },
-    { "FilePrefix": "UpStream/Archive/20260825/CN_CN_A", "CID": "4501806882199176893" }
+    { "FilePrefix": "Data/20260825/HK_HKEX_", "CID": "3501806882199176893" },
+    { "FilePrefix": "Data/20260825/CN_CN_A", "CID": "4501806882199176893" }
   ]
 }
