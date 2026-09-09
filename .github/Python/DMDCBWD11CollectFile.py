@@ -247,8 +247,13 @@ def main(cfg_path=None, out_dir=None, commit_fn=None, commit_msg=None):
         status = result.get("http_status")
         print("[PASS] 上传成功，http_status=%s（201=新建 / 200=更新）" % status)
         return 0
-    message = result.get("message") if isinstance(result, dict) else result
-    print("[FAIL] 上传失败: %s" % message)
+    if isinstance(result, dict):
+        message = result.get("message")
+        status = result.get("http_status")
+        status_prefix = "HTTP %s: " % status if status is not None else ""
+    else:
+        message, status_prefix = result, ""
+    print("[FAIL] 上传失败: %s%s" % (status_prefix, message))
     return 1
 
 

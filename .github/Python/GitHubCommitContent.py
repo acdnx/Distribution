@@ -172,7 +172,8 @@ $env:GIT_COMMIT_TOKEN = "ghp_你的Token"；严禁把令牌写进任何源码）
        { "success": bool, "message": str|None, "path": path_key, "http_status": int|None }
        - success=True  时 message 为 None；
        - success=False 时 message 为失败原因（令牌缺失 / .git 解析失败 / 网络错误 /
-         GitHub 返回的错误 message 原文等），http_status 为 GitHub 状态码或 None。
+         GitHub 返回的错误 message 原文等；均带 HTTP 状态码前缀，404 时会探测仓库/分支
+         存在性并给出排查提示），http_status 为 GitHub 状态码或 None。
 
 五、安全红线（AGENT 必须遵守）
 ----------------------------------------------------------------------------------------
@@ -187,6 +188,9 @@ $env:GIT_COMMIT_TOKEN = "ghp_你的Token"；严禁把令牌写进任何源码）
       内部按 "/" 保留、其余字符 URL 编码；
     - 文件内容按 UTF-8 编码后再 Base64；content 参数可为多行字符串；
     - branch 不存在时 GitHub 会返回 422 错误（message 中说明 ref 不存在）；
+    - 提交/更新到不存在的仓库，或令牌对该仓库无权限时，GitHub 统一返回 404
+      "Not Found"（为不暴露仓库存在性，与“文件不存在”无法在响应上区分）；此时失败
+      message 会探测仓库/分支存在性并列出可操作的排查项；
     - 提交相同 sha 的文件会以 commit_msg 生成新 commit；提交未变更内容也会生成空 commit
       （GitHub 不拒绝）；删除文件不属本工具范围；
     - 大量循环提交时注意 GitHub API 限流（默认 5000 次/小时），建议批量场景自行控制频率；
@@ -590,6 +594,52 @@ def _get_file_sha(api_base, owner, repo, path_key, branch, token, timeout):
     return None
 
 
+def _probe_repo_branch(api_base, owner, repo, branch, token, timeout):
+    """探测目标仓库与分支的存在性，供 404 失败路径拼出明确原因（只读，不抛异常）
+
+    GitHub 对“仓库不存在”和“令牌无权限”统一返回 404（避免暴露仓库存在性），
+    仅凭 Contents 接口的 "Not Found" 无法区分；本函数在失败路径上补两次只读探测：
+        GET /repos/{owner}/{repo}                    → 仓库存在性
+        GET /repos/{owner}/{repo}/branches/{branch}  → 分支存在性
+    成功路径不调用，零额外开销。
+
+    :param api_base: GitHub API 仓库根（含 /repos）
+    :param owner: 仓库属主
+    :param repo: 仓库名
+    :param branch: 目标分支
+    :param token: 访问令牌
+    :param timeout: 超时秒数
+    :return: 一段中文说明（含探测到的事实），如“仓库 cnxnc/Distribution 存在，
+             分支 Migration 不存在”
+    """
+    base = (api_base or DEFAULT_API_BASE).rstrip("/")
+    # 1) 仓库存在性：GET /repos/{owner}/{repo}
+    repo_status, _, _ = _request(
+        "GET", "%s/%s/%s" % (base, owner, repo),
+        _auth_headers(token), None, timeout)
+    if repo_status is None:
+        return "仓库探测失败（网络错误，无法进一步定位）"
+    if repo_status == 401:
+        return "令牌无效或已过期（HTTP 401），请检查 GIT_COMMIT_TOKEN"
+    if repo_status == 403:
+        return "令牌权限不足（HTTP 403），请检查 GIT_COMMIT_TOKEN 是否含 repo / contents:write 权限"
+    if repo_status == 404:
+        return "仓库 %s/%s 不存在（或无访问权限）" % (owner, repo)
+    if repo_status != 200:
+        return "仓库 %s/%s 探测返回 HTTP %d（异常状态）" % (owner, repo, repo_status)
+    # 2) 分支存在性：GET /repos/{owner}/{repo}/branches/{branch}（仓库存在才继续）
+    branch_status, _, _ = _request(
+        "GET", "%s/%s/%s/branches/%s" % (base, owner, repo,
+                                         urllib.parse.quote(branch, safe="")),
+        _auth_headers(token), None, timeout)
+    if branch_status == 404:
+        return "仓库 %s/%s 存在，但分支 %s 不存在" % (owner, repo, branch)
+    if branch_status != 200:
+        return "仓库 %s/%s 存在，但分支探测返回 HTTP %d（可能为令牌权限不足）" % (
+            owner, repo, branch_status)
+    return "仓库 %s/%s 与分支 %s 均存在" % (owner, repo, branch)
+
+
 def commit_content(path_key, content, branch=None, commit_msg=None,
                    owner=None, repo=None, token=None,
                    api_base=DEFAULT_API_BASE, timeout=30):
@@ -637,6 +687,9 @@ def commit_content(path_key, content, branch=None, commit_msg=None,
     if not (owner and repo):
         return fail("❌ 未能从 Commit.json 或本仓库 .git/config 解析出 github.com 的 "
                     "owner/repo，请显式传入 owner/repo 参数")
+    # 解析完成即输出目标信息（走 stderr 诊断，便于日志里一眼定位仓库/分支配置问题）
+    _warn("提交目标解析: 仓库 = %s/%s | 分支 = %s | 路径 = %s"
+          % (owner, repo, target_branch, path_key))
     now_iso = datetime.datetime.now().isoformat()
     target_msg = commit_msg or ("UpdatedAt@" + now_iso)
 
@@ -675,11 +728,22 @@ def commit_content(path_key, content, branch=None, commit_msg=None,
             return {"success": True, "message": None,
                     "path": path_key, "http_status": status}
         # 2xx 但响应带 message/status（GitHub 的异常应答形态）→ 按失败处理
-        reason = parsed.get("message") or ("HTTP %s" % status)
+        reason = "HTTP %s: %s" % (status,
+                                  (parsed.get("message") or "GitHub 返回异常应答"))
+    elif status == 404:
+        # 404 最常见三因：仓库不存在 / 令牌无权限 / 分支不存在。GitHub 对“仓库不存在”
+        # 与“令牌无权限”统一返回 404（避免暴露仓库存在性），仅凭 "Not Found" 无法区分；
+        # 故在此失败路径上额外探测一次仓库与分支的存在性，把原因讲清楚。
+        probe = _probe_repo_branch(api_base, owner, repo, target_branch, tok, timeout)
+        reason = ("HTTP 404 Not Found | %s | 请求对象 = %s/%s，分支 = %s，路径 = %s。"
+                  "请依次核对：1) Commit.json 的 Owner/Repo 是否指向存在的仓库；"
+                  "2) GIT_COMMIT_TOKEN 是否有该仓库写权限（contents:write / repo scope）；"
+                  "3) 目标分支 %s 是否已在远端创建"
+                  % (probe, owner, repo, target_branch, path_key, target_branch))
     else:
         # 非 2xx：优先取 GitHub 错误体中的 message 原文
         if isinstance(parsed, dict) and parsed.get("message"):
-            reason = parsed.get("message")
+            reason = "HTTP %s: %s" % (status, parsed.get("message"))
         else:
             snippet = (text or "").strip().replace("\n", " ")[:300]
             reason = "HTTP %s: %s" % (status, snippet if snippet else "空响应体")

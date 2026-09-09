@@ -15,6 +15,9 @@ DMDCBWD31MigrationFile —— 下载上传清单 → 逐文件 OBS 上传 → �
        - 文件不存在：打印日志 + 进程内汇总（不报错、跳过，不终止）；
        - 文件存在：调用 OBSClient.upload_file 上传（携带 rel_path / key / owner /
          repo / branch / md5 / root_prefix / cid / callback_url 等回调上下文；
+         其中回调上下文 branch 取 Upstream.json 的 BranchCurrent【来源分支】
+         （与清单 Branch/{BranchCurrent}/ 目录段口径一致，供回调处理端
+         归档到 Archive/Branch/{branch}/{cid}/；勿误传 BranchMigration）；
          key 传 None 时由 OBSClient 自动构造，规则：
          {OBSRootPrefix}/{运行当天yyyyMMdd}/{CID}/{文件名}，
          CID 按 Upstream.json 的 OBSCIDRoutes 前缀路由规则解析
@@ -386,7 +389,7 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
             digest_md5 = _md5_hex_upper(f.read())
         cid_value, _matched = resolve_cid(rel_path, cid_routes)
         result = obs(local_file=local_file, rel_path=rel_path, key=OBS_KEY_AUTO,
-                     owner=owner, repo=repo, branch=branch_migration,
+                     owner=owner, repo=repo, branch=branch_current,
                      sha1=None, md5=digest_md5, root_prefix=root_prefix,
                      cid=cid_value, callback_url=callback_url)
         if isinstance(result, dict) and result.get("success"):
