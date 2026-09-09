@@ -23,7 +23,7 @@ DMDCBWD11CollectFile —— 编排：收集文件清单 → 写本地 txt → �
 {BranchMigration} 与 {BranchCurrent} 均取自同目录 Upstream.json：
 
     {
-      "TargetBranch":    "test",      // （历史字段，其它脚本在用，保留不动）
+      "TargetBranch":    "dev",      // （历史字段，其它脚本在用，保留不动）
       "BranchMigration": "Migration", // 迁移文件驻留/上传目标远端分支（默认 Migration）
       "BranchCurrent":   "dev"        // 远端路径 Branch/... 中的“当前分支”目录段
     }
