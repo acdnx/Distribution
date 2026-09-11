@@ -19,7 +19,7 @@ on:
         description: 选择要执行工作流的分支（需包含 .github/Python/DMDCBWD31MigrationFile.py 及同目录依赖模块）
         type: string
         required: false
-        default: dev
+        default: quote
 
 jobs:
   DMDCBWD31MigrationFile:
