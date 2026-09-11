@@ -1,4 +1,4 @@
-name: DMDCBWD31MigrationFileQuote
+name: DMDCBWD31MigrationFileQuoteGold
 
 # DMDCBWD31MigrationFile：下载上传清单 -> 逐文件 OBS 上传 -> 回传成功清单
 # （执行所选分支下 .github/Python/DMDCBWD31MigrationFile.py；命名沿革：
@@ -19,7 +19,7 @@ on:
         description: 选择要执行工作流的分支（需包含 .github/Python/DMDCBWD31MigrationFile.py 及同目录依赖模块）
         type: string
         required: false
-        default: quote
+        default: quote-gold
 
 jobs:
   DMDCBWD31MigrationFile:
