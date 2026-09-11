@@ -34,7 +34,7 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: RUN DMDCBWD31MigrationFile
+      - name: RunDMDCBWD31MigrationFile
         env:
           # 必填：GitHub 写仓库令牌（下载上传清单 / 回传 UploadSuccessList 到 BranchMigration 用）
           GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
