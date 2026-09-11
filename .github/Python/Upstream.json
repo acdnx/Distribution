@@ -1,5 +1,5 @@
 {
-  "TargetBranch": "dev",
+  "TargetBranch": "quote",
   "BranchMigration": "Migration",
   "BranchCurrent": "quote",
   "UploadFileListPath": "Branch/Migration/UploadFileList_20260909_151438894_E52C2C0C55CA71D498374DFB543AAE0C.txt",
