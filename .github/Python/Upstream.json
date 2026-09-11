@@ -5,6 +5,6 @@
   "UploadFileListPath": "Branch/quote/UploadFileList_20260911_184741350_3868C1BAEF6F42ECF547CE3A2DE7DE1A.txt",
   "OBSCIDRoutes": [
     { "FilePrefix": "Data/Test/", "CID": "3501806882199176893" },
-    { "FilePrefix": "Data/20260825/", "CID": "4501806882199176893" }
+    { "FilePrefix": "Data/Demo/", "CID": "4501806882199176893" }
   ]
 }
