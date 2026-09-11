@@ -1,0 +1,10 @@
+{
+  "TargetBranch": "quote",
+  "BranchMigration": "Migration",
+  "BranchCurrent": "quote",
+  "UploadFileListPath": "Branch/Migration/UploadFileList_20260909_151438894_E52C2C0C55CA71D498374DFB543AAE0C.txt",
+  "OBSCIDRoutes": [
+    { "FilePrefix": "Data/20260825/HK_HKEX_", "CID": "3501806882199176893" },
+    { "FilePrefix": "Data/20260825/CN_CN_A", "CID": "4501806882199176893" }
+  ]
+}
