@@ -1,4 +1,4 @@
-name: DMDCBWD31MigrationFile
+name: DMDCBWD31MigrationFileQuote
 
 # DMDCBWD31MigrationFile：下载上传清单 -> 逐文件 OBS 上传 -> 回传成功清单
 # （执行所选分支下 .github/Python/DMDCBWD31MigrationFile.py；命名沿革：
