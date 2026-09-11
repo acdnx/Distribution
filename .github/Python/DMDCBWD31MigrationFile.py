@@ -99,7 +99,7 @@ from UpstreamFileList import _repo_root  # noqa: E402
 # ---------------------------------------------------------------------------
 
 # Upstream.json 中本流程仓库内路径配置键（仅路径类；OBS 前缀 / 回调端点走环境变量）
-UPSTREAM_JSON = "Upstream.json"
+UPSTREAM_JSON = "Migration.quote.json"
 JSON_KEY_UPLOAD_FILE_LIST_PATH = "UploadFileListPath"
 JSON_KEY_BRANCH_CURRENT = "BranchCurrent"
 # OBS 对象 key 前缀（必填）：原 Upstream.json 的 OBSRootPrefix，改环境变量注入
