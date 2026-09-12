@@ -20,12 +20,12 @@ DMDCBWD11CollectFile —— 编排：收集文件清单 → 写本地 txt → �
        - yyyyMMdd_HHmmssSSS：本地生成时间（毫秒 3 位）；
        - MD5：清单 txt 文件内容的 MD5（UTF-8 编码、大写 hex），同内容再跑会生成相同 MD5。
 
-{BranchMigration} 与 {BranchCurrent} 均取自同目录 Upstream.json：
+{BranchMigration} 与 {BranchCurrent} 均取自同目录 Migration.{BranchCurrent}.json：
 
     {
-      "TargetBranch":    "dev",      // （历史字段，其它脚本在用，保留不动）
+      "TargetBranch":    "quote",      // （历史字段，其它脚本在用，保留不动）
       "BranchMigration": "Migration", // 迁移文件驻留/上传目标远端分支（默认 Migration）
-      "BranchCurrent":   "dev"        // 远端路径 Branch/... 中的“当前分支”目录段
+      "BranchCurrent":   "quote"        // 远端路径 Branch/... 中的“当前分支”目录段
     }
 
 字段缺失 / 为空 / 文件非法 / 不在 Git 仓库内时一律失败退出——不落到任何默认分支，
