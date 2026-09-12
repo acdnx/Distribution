@@ -1,0 +1,68 @@
+name: DMDCBWD31MigrationFile{BRANCH_PASCAL}
+
+# ⚠️ 这是 branch-template 模板分支上的**工作流模板**：文件名里的 {BRANCH_PASCAL}、正文里的
+#    {BRANCH} 与 {CRON_MIGRATE} 都是占位符 —— 在模板分支上它不会运行、也不该运行
+#    （占位符不是合法分支名，{CRON_MIGRATE} 也不是合法 cron，GitHub 会判本文件无效）。
+#    新建独立分支时按 .github/BRANCH_TEMPLATE.md 的清单逐一替换。
+#
+# DMDCBWD31MigrationFile：下载上传清单 -> 逐文件 OBS 上传 -> 回传成功清单
+# （执行所选分支下 .github/Python/DMDCBWD31MigrationFile.py；命名沿革：
+#   UpstreamUpload.py → Migration31UpstreamUpload.py → DMDCBWD31MigrationFile.py）
+#
+# 触发方式：
+#   1. 定时：每天自动触发一次（cron 为占位符 {CRON_MIGRATE} —— 换成**本分支独占**的时段，
+#      必须比本分支的 11 系列（{CRON_COLLECT}）晚 2 小时，见 .github/BRANCH_TEMPLATE.md 的「时段分配」）。
+#      排期约定：11 系列（采集）先跑，31 系列（迁移）晚 2 小时；同系列各分支共用
+#      concurrency 组 "DMDCBWD31-migration" **串行执行**（排队而非并发）；各分支 cron 相互错开。
+#      注意：schedule 只在仓库【默认分支】上已存在的工作流文件生效 —— 本文件放在分支上，
+#      它自己的 schedule 是**死的**；真正驱动定时的是 dev 上的同名副本。
+#   2. 手动：workflow_dispatch，可在 Run workflow 面板输入/选择要执行的具体分支
+#      （默认 {BRANCH}；该分支需包含 DMDCBWD31MigrationFile.py 及同目录依赖模块）。
+on:
+  schedule:
+    - cron: '{CRON_MIGRATE}'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 选择要执行工作流的分支（需包含 .github/Python/DMDCBWD31MigrationFile.py 及同目录依赖模块）
+        type: string
+        required: false
+        default: '{BRANCH}'
+
+# 串行化：与同系列其它分支**共用同一个组名** —— 同一时刻只跑一个，其余排队等待
+# （cancel-in-progress: false = 排队，而不是取消已在跑的那个）。
+# 注意：GitHub 对同一 concurrency 组只保留「1 个运行中 + 1 个待运行」；若前一个跑得过久、
+# 下一个又到点，待运行的那个会被新来的顶掉 —— 靠各分支 cron 错峰规避。
+concurrency:
+  group: DMDCBWD31-migration
+  cancel-in-progress: false
+
+jobs:
+  DMDCBWD31MigrationFile:
+    runs-on: ubuntu-latest
+    steps:
+      # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 {BRANCH}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || '{BRANCH}' }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: RunDMDCBWD31MigrationFile
+        env:
+          # 必填：GitHub 写仓库令牌（下载上传清单 / 回传 UploadSuccessList 到 BranchMigration 用）
+          GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
+          # 必填：华为云 OBS 凭据（真实上传用）
+          HWC_OBS_AK: ${{ secrets.HWC_OBS_AK }}
+          HWC_OBS_SK: ${{ secrets.HWC_OBS_SK }}
+          # 可选：区域/桶（缺省由脚本按 cn-south-1 / gza 默认；配置后覆盖）
+          HWC_OBS_REGION_ID: ${{ vars.HWC_OBS_REGION_ID }}
+          HWC_OBS_BUCKET: ${{ vars.HWC_OBS_BUCKET }}
+          # 必填：OBS 对象 key 前缀（原配置文件的 OBSRootPrefix，已移出配置文件，改走 Secret）
+          HWC_OBS_ROOT_PREFIX: ${{ secrets.HWC_OBS_ROOT_PREFIX }}
+          # 可选：服务端原生回调端点（原配置文件的 CallbackUrl，已移出配置文件；
+          #       未设置则不上 x-obs-callback 头，不回调）
+          HWC_OBS_CALLBACK_URL: ${{ secrets.HWC_OBS_CALLBACK_URL }}
+        run: python3 .github/Python/DMDCBWD31MigrationFile.py

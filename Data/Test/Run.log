@@ -1,0 +1,6 @@
+{
+  "ts": 1783097520,
+  "dt": "2026-01-01 00:03:00 UTC",
+  "state_backend": "dynamodb",
+  "note": "branch-template 的测试用样例，非真实执行日志"
+}

@@ -1,0 +1,22 @@
+# 标题 : 模板测试样例 分钟级行情数据
+# 数据供应商 : TEST
+# 字段 : "Ts|Date|Time|Open|Close|Low|High|Volume|Turnover|ChangePrice|ChangePercent"
+# 字段名称 : "时间戳(UTC)|日期|时间|开盘价|收盘价|最低价|最高价|成交量|成交额|涨跌值|涨跌幅(%)"
+# 字段类型 : "int|int|int|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|str"
+# 计数 : 3
+# 采集时间 : "2026-01-01 00:00:00"
+# 证券代码 : Template
+# 市场 : test
+# Title : Template Minute Quote Data
+# DataProvider : TEST
+# Field : "Ts|Date|Time|Open|Close|Low|High|Volume|Turnover|ChangePrice|ChangePercent"
+# FieldName : "Ts|Date|Time|Open|Close|Low|High|Volume|Turnover|ChangePrice|ChangePercent"
+# DataType : "int|int|int|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|str"
+# Count : 3
+# CollectTime : "2026-01-01 00:00:00"
+# SecuCode : Template
+# Market : test
+# Remark : "branch-template 的测试用样例，非真实行情数据"
+1783097340|20260101|000000|4182.4|4182.2|||24|0|46.7|1.13
+1783097400|20260101|000100|4182.2|4183.1|||35|0|47.6|1.15
+1783097460|20260101|000200|4183.1|4183.6|||34|0|48.1|1.16

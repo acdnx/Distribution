@@ -141,3 +141,12 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 例外：Data/ 下的 .log 是**有意提交**的数据
+# （第 3 行的 *.log 来自 Node 模板；本仓把 Data/ 当数据目录，.log 也是数据格式之一。
+#   不加这条，本地 git add 会**静默跳过**它们 —— 走 GitHub API 提交则不受 .gitignore 约束）
+!Data/**/*.log
