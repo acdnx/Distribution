@@ -313,18 +313,41 @@ def _log(message):
 
 
 def parse_manifest_lines(text):
-    """解析清单文本为“一行一个”的相对路径列表
+    """解析清单文本为条目列表（一行一个）
+
+    现行格式为四元组，**路径在最后一位**（便于“从左按 | 切分、剩余整体作为路径”，
+    即使路径中含 | 也不会错位）：
+
+        {最后修改时间}|{SHA1}|{MD5}|{相对路径}
+
+    兼容历史格式（一行只有一个相对路径）：此时 sha1 / md5 / mtime 均为 None，
+    由调用方决定回退策略（当前实现：本地重算 md5，sha1 传 None）。
 
     :param text: 清单全文
-    :return: list[str]：每项为该行去除首尾空白后的相对路径；空行与全空白行忽略
+    :return: list[dict]，每项 {"rel_path": str, "sha1": str|None,
+             "md5": str|None, "mtime": str|None}；空行与全空白行忽略
     """
     text = (text or "").lstrip("﻿")  # 去掉可能的 BOM
-    lines = []
+    entries = []
     for line in text.splitlines():
-        rel = line.strip().replace("\\", "/")
-        if rel:
-            lines.append(rel)
-    return lines
+        raw = line.strip()
+        if not raw:
+            continue
+        fields = raw.split("|", 3)   # 至多切 3 次 → 第 4 段保留其余全部内容
+        if len(fields) == 4:
+            mtime, sha1, md5, rel_path = fields
+        else:
+            mtime, sha1, md5, rel_path = None, None, None, raw
+        rel_path = rel_path.strip().replace("\\", "/")
+        if not rel_path:
+            continue
+        entries.append({
+            "rel_path": rel_path,
+            "sha1": (sha1 or "").strip() or None,
+            "md5": (md5 or "").strip() or None,
+            "mtime": (mtime or "").strip() or None,
+        })
+    return entries
 
 
 def load_obs_runtime_env():
@@ -406,13 +429,16 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
         message = download.get("message") if isinstance(download, dict) else download
         _log("[FAIL] 下载上传清单失败: %s" % message)
         return 1
-    lines = parse_manifest_lines(download.get("text"))
+    entries = parse_manifest_lines(download.get("text"))
     dl_branch = download.get("branch") or branch_migration
+    with_hash = sum(1 for e in entries if e["md5"])
     _log("[INFO] 上传清单下载自 GitHub：%s/%s 分支 %s"
           % (owner, repo, dl_branch))
-    _log("[INFO]   ↳ 远程文件：https://github.com/%s/%s/blob/%s/%s（共 %d 行，"
-          "每行为相对仓库根目录的路径）"
-          % (owner, repo, dl_branch, upload_path, len(lines)))
+    _log("[INFO]   ↳ 远程文件：https://github.com/%s/%s/blob/%s/%s"
+          "（共 %d 行：%d 行四元组 {最后修改时间}|{SHA1}|{MD5}|{路径}，"
+          "%d 行历史格式仅含路径）"
+          % (owner, repo, dl_branch, upload_path, len(entries),
+             with_hash, len(entries) - with_hash))
 
     # ---- 3) 定位本地仓库根，逐行处理 ----
     root = _repo_root()
@@ -422,19 +448,26 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
 
     obs = obs_fn or OBSClient.upload_file
     ok_paths, missing_count, fail_count = [], 0, 0
-    for rel_path in lines:
+    for entry in entries:
+        rel_path = entry["rel_path"]
         local_file = os.path.join(root, rel_path)
         if not os.path.isfile(local_file):
             missing_count += 1
             _log("[跳过] 本地文件不存在: %s" % rel_path)
             continue
-        # 计算回调口径哈希：md5（内容、大写 hex）；sha1 暂不计算，预留传 None
-        with open(local_file, "rb") as f:
-            digest_md5 = _md5_hex_upper(f.read())
+        # 回调口径哈希：优先取清单四元组里已有的值（清单由采集端按 git 最后提交时间 +
+        # 内容 SHA1/MD5 产出）；清单为历史格式（仅路径）时才本地重算 md5、sha1 留空。
+        if entry["md5"]:
+            digest_md5 = entry["md5"]
+            digest_sha1 = entry["sha1"]
+        else:
+            with open(local_file, "rb") as f:
+                digest_md5 = _md5_hex_upper(f.read())
+            digest_sha1 = None
         cid_value, _matched = resolve_cid(rel_path, cid_routes)
         result = obs(local_file=local_file, rel_path=rel_path, key=OBS_KEY_AUTO,
                      owner=owner, repo=repo, branch=branch_current,
-                     sha1=None, md5=digest_md5, root_prefix=root_prefix,
+                     sha1=digest_sha1, md5=digest_md5, root_prefix=root_prefix,
                      cid=cid_value, callback_url=callback_url)
         if isinstance(result, dict) and result.get("success"):
             ok_paths.append(rel_path)
@@ -444,7 +477,7 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
             message = result.get("message") if isinstance(result, dict) else result
             _log("[上传失败] %s -> %s" % (rel_path, message))
     _log("[INFO] 汇总：共 %d 个 | 成功 %d | 本地缺失 %d | 上传失败 %d"
-          % (len(lines), len(ok_paths), missing_count, fail_count))
+          % (len(entries), len(ok_paths), missing_count, fail_count))
 
     # ---- 4) 无成功文件：正常结束（无需回传成功清单）----
     if not ok_paths:
