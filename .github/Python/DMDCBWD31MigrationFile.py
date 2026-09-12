@@ -9,20 +9,21 @@ DMDCBWD31MigrationFile —— 下载上传清单 → 逐文件 OBS 上传 → �
 承接 DMDCBWD11CollectFile（把仓库数据文件清单上传到远端）之后的“真正把文件上传到 OBS”环节：
 
     1. 从 Commit.json 登记的目标仓库（Owner/Repo）的 BranchMigration 分支，下载
-       Upstream.json 中 UploadFileListPath 指定的清单 txt（GitHub Contents GET）；
+       分支配置 Migration.{当前分支}.json 中 UploadFileListPath 指定的清单 txt
+       （GitHub Contents GET）；
     2. 把清单按行读取，每行是该文件相对【仓库根目录】的相对路径；
     3. 逐行到本地仓库工作树取对应文件：
        - 文件不存在：打印日志 + 进程内汇总（不报错、跳过，不终止）；
        - 文件存在：调用 OBSClient.upload_file 上传（携带 rel_path / key / owner /
          repo / branch / md5 / root_prefix / cid / callback_url 等回调上下文；
-         其中回调上下文 branch 取 Upstream.json 的 BranchCurrent【来源分支】
-         （与清单 Branch/{BranchCurrent}/ 目录段口径一致，供回调处理端
+         其中回调上下文 branch 取 BranchCurrent【来源分支】——由当前 git 检出
+         动态取得（与清单 Branch/{BranchCurrent}/ 目录段口径一致，供回调处理端
          归档到 Archive/Branch/{branch}/{cid}/；勿误传 BranchMigration）；
          key 传 None 时由 OBSClient 自动构造，规则：
          {OBSRootPrefix}/{运行当天yyyyMMdd}/{CID}/{文件名}，
-         CID 按 Upstream.json 的 OBSCIDRoutes 前缀路由规则解析
+         CID 按分支配置的 OBSCIDRoutes 前缀路由规则解析
          （先配置先命中，未命中任何规则用默认 3501806882199176893）；
-         OBSRootPrefix 与回调端点不再放进 Upstream.json（避免入库），改由环境变量注入：
+         OBSRootPrefix 与回调端点不放进配置文件（避免入库），改由环境变量注入：
          前缀必填 = HWC_OBS_ROOT_PREFIX；回调端点可选 = HWC_OBS_CALLBACK_URL
          （设置了回调端点，PUT 才携带 x-obs-callback 头），由 OBS 在对象落盘成功后
          【服务端原生回调】该端点（回调体含仓库上下文 + OBS 系统变量，
@@ -42,21 +43,30 @@ DMDCBWD31MigrationFile —— 下载上传清单 → 逐文件 OBS 上传 → �
         { "Owner": "ACANX", "Repo": "Dist", "BranchMigration": "Migration",
           "BranchSuccess": "Success", "BranchDelete": "Delete" }
         BranchSuccess = UploadSuccessList 成功清单的回传分支（未登记则回退 BranchMigration）
+        该文件登记的是【仓库级】身份与回传分支，与当前分支无关 —— 权威副本只有
+        dev 分支上的一份，运行时经 Contents API 取回并落盘缓存（见
+        GitHubCommitContent.load_commit_config）；取不到才回退本地同目录副本。
 
-    Upstream.json（仓库内路径类配置；OBS 前缀 / 回调端点已移出，改走环境变量）：
+    Migration.{BranchCurrent}.json（仓库内路径类配置；OBS 前缀 / 回调端点已移出，改走环境变量）：
+        文件名中的 {BranchCurrent} 随【当前 git 分支】动态解析（resolve_config_path）：
+        在 quote 分支上读 Migration.quote.json，在 quote-gold 分支上读
+        Migration.quote-gold.json —— 同一份脚本原样放到哪个分支就读哪份配置，
+        各分支因此无需各维护一份脚本副本，合并时配置文件也不会冲突。
         {
-          "BranchCurrent": "dev",                                     // Branch/{BranchCurrent} 目录段
-          "BranchMigration": "Migration",                             // 迁移文件驻留/上传目标远端分支
-          "UploadFileListPath": "Branch/dev/UploadFileList_....txt"   // 待下载清单的仓库内路径
+          "UploadFileListPath": "Branch/{BranchCurrent}/UploadFileList_....txt",  // 待下载清单的仓库内路径
           "OBSCIDRoutes": [                                           // CID 前缀路由（先配置先命中）
             { "FilePrefix": "UpStream/Archive/20260825/HK_HKEX_", "CID": "11..." },
             { "FilePrefix": "UpStream/Archive/20260825/CN_CN_A",   "CID": "22..." }
           ]                                                           // 未命中任何规则 -> 默认 CID
         }
+        历史字段：BranchCurrent / BranchMigration / TargetBranch 均已废弃 —— BranchCurrent
+        由当前 git 分支动态取得，BranchMigration 取自 Commit.json（取值重复），
+        TargetBranch 无任何代码读取。文件中若仍残留这些键，一律忽略（残留
+        BranchCurrent 时额外告警）。
 
     环境变量（OBS 运行期配置，不入仓库；GitHub Actions 以 Secret 注入）：
-        HWC_OBS_ROOT_PREFIX  必填：OBS 对象 key 前缀（原 Upstream.json 的 OBSRootPrefix）
-        HWC_OBS_CALLBACK_URL 可选：服务端原生回调端点（原 Upstream.json 的 CallbackUrl；
+        HWC_OBS_ROOT_PREFIX  必填：OBS 对象 key 前缀（原配置文件的 OBSRootPrefix）
+        HWC_OBS_CALLBACK_URL 可选：服务端原生回调端点（原配置文件的 CallbackUrl；
                               未设置则不回调，PUT 不携带 x-obs-callback）
 
 退出码：
@@ -68,7 +78,7 @@ DMDCBWD31MigrationFile —— 下载上传清单 → 逐文件 OBS 上传 → �
     - 远端下载/回传依赖环境变量 GIT_COMMIT_TOKEN（由 GitHubCommitContent 读取）；
     - OBS 上传必需 HWC_OBS_ROOT_PREFIX（对象 key 前缀）；可选 HWC_OBS_CALLBACK_URL（回调端点）；
     - 同目录需存在：GitHubCommitContent.py、UpstreamFileList.py、OBSClient.py、
-      Commit.json、Upstream.json。
+      Commit.json（取不到远端时的本地回退副本）、Migration.{当前分支}.json。
 
 二、运行方式
 ----------------------------------------------------------------------------------------
@@ -86,6 +96,7 @@ import datetime
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -104,13 +115,21 @@ from UpstreamFileList import _repo_root  # noqa: E402
 # 常量（默认值）
 # ---------------------------------------------------------------------------
 
-# Upstream.json 中本流程仓库内路径配置键（仅路径类；OBS 前缀 / 回调端点走环境变量）
-UPSTREAM_JSON = "Migration.quote.json"
+# 分支配置文件（只存仓库内路径类配置；OBS 前缀 / 回调端点走环境变量）命名约定：
+#   Migration.{BranchCurrent}.json（与本脚本同目录）
+# 文件名中的 {BranchCurrent} **随当前 git 分支动态解析**（见 resolve_config_path）——
+# 同一份脚本原样放到 quote / quote-gold / … 都能加载该分支自己的配置，各分支因此
+# 无需各自维护一份 DMDCBWD31MigrationFile.py 副本；两份配置在合并时也不会冲突。
+CONFIG_NAME_TEMPLATE = "Migration.%s.json"
 JSON_KEY_UPLOAD_FILE_LIST_PATH = "UploadFileListPath"
-JSON_KEY_BRANCH_CURRENT = "BranchCurrent"
-# OBS 对象 key 前缀（必填）：原 Upstream.json 的 OBSRootPrefix，改环境变量注入
+# 历史字段：BranchCurrent 现由当前 git 分支动态取得。配置文件里若仍残留该键，
+# 一律忽略并告警（仅作迁移期提示，不参与解析）。
+# 另：TargetBranch 已删除（全仓无代码读取）、BranchMigration 已删除（取值与
+# Commit.json 完全重复），故此处不再声明对应常量。
+JSON_KEY_BRANCH_CURRENT_LEGACY = "BranchCurrent"
+# OBS 对象 key 前缀（必填）：原配置文件的 OBSRootPrefix，改环境变量注入
 ENV_OBS_ROOT_PREFIX = "HWC_OBS_ROOT_PREFIX"
-# 服务端原生回调端点（可选）：原 Upstream.json 的 CallbackUrl，改环境变量注入；
+# 服务端原生回调端点（可选）：原配置文件的 CallbackUrl，改环境变量注入；
 # 未设置则不回调（upload_file 不携带 x-obs-callback 头）
 ENV_OBS_CALLBACK_URL = "HWC_OBS_CALLBACK_URL"
 # CID 前缀路由：OBSCIDRoutes = [ {FilePrefix, CID}, ... ]，顺序即优先级（先配置先命中）
@@ -128,7 +147,7 @@ SUCCESS_FILE_PREFIX = "UploadSuccessList"
 
 # 本次 OBS 上传的“存储桶目标 key”：None = 不显式指定，由 OBSClient.upload_file
 # 按规则自动构造（{OBSRootPrefix}/{运行当天yyyyMMdd}/3501806882199176893/{文件名}，
-# 其中 OBSRootPrefix 由 Upstream.json 的 OBSRootPrefix 字段配置并随调用传入）；
+# 其中 OBSRootPrefix 由环境变量 HWC_OBS_ROOT_PREFIX 提供并随调用传入）；
 # 后续如需改为固定 key，可在此一次性替换。
 OBS_KEY_AUTO = None
 
@@ -153,10 +172,55 @@ def _ensure_console_utf8():
             pass
 
 
+def current_branch(start_dir=None):
+    """取当前工作树所在的分支名（即 BranchCurrent）
+
+    这是“当前分支”的唯一事实来源 —— 配置文件路径与 BranchCurrent 都由它推出，
+    不再写进配置文件，否则又多出一份可能与实际检出的分支不一致的副本，
+    而消除这类副本正是本次改造的目的。
+
+    :param start_dir: 判定分支的起始目录（须位于目标仓库工作树内）；None = 本脚本所在目录
+    :return: (branch, err)：成功 branch 为分支名、err 为 None；
+             失败 branch 为 None、err 为失败原因
+    """
+    base = start_dir or _SCRIPT_DIR
+    try:
+        proc = subprocess.run(
+            ["git", "-C", base, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except OSError as e:
+        return None, "无法执行 git（%s）；本流程需要 git 判定当前分支" % e
+    if proc.returncode != 0:
+        return None, "git rev-parse --abbrev-ref HEAD 失败：%s" % (
+            (proc.stderr or "").strip() or "退出码 %d" % proc.returncode)
+    name = (proc.stdout or "").strip()
+    if not name or name == "HEAD":
+        return None, ("当前为游离 HEAD（detached HEAD），判定不出分支名；"
+                      "配置文件按约定名为 %s，请在具名分支的检出上运行"
+                      % (CONFIG_NAME_TEMPLATE % "<当前分支>"))
+    return name, None
+
+
+def resolve_config_path(cfg_path=None, start_dir=None):
+    """解析分支配置文件路径（约定名 Migration.{当前分支}.json）
+
+    :param cfg_path: 显式指定的配置路径（测试注入 / 特殊部署用）；None = 按约定解析
+    :param start_dir: 判定当前分支的起始目录；None = 本脚本所在目录
+    :return: (path, branch, err)：成功 path 为配置文件路径、branch 为当前分支名、
+             err 为 None；失败 path 为 None、err 为失败原因
+    """
+    branch, err = current_branch(start_dir)
+    if branch is None:
+        return None, None, err
+    if cfg_path:
+        return cfg_path, branch, None
+    return os.path.join(_SCRIPT_DIR, CONFIG_NAME_TEMPLATE % branch), branch, None
+
+
 def load_commit_identity(cfg_path=None):
     """读取 Commit.json 并校验目标仓库身份字段（owner / repo / branch_migration）
 
-    :param cfg_path: Commit.json 路径；None = 同目录默认
+    :param cfg_path: Commit.json 路径；None = 权威副本（dev）优先，取不到用同目录副本
     :return: (cfg, err)：成功时 cfg 为 dict{owner,repo,branch_migration}、err 为 None；
              失败时 cfg 为 None、err 为失败原因
     """
@@ -173,64 +237,65 @@ def load_commit_identity(cfg_path=None):
 def load_success_branch(cfg_path=None, fallback=""):
     """读取 Commit.json 的 BranchSuccess（UploadSuccessList 成功清单的回传分支）
 
-    该字段只有本流程使用，故不走 GitHubCommitContent.load_commit_config（其返回的
-    dict 不含该键），在此按同目录同文件自行读取；文件名沿用
-    GitHubCommitContent.COMMIT_CONFIG_FILE，避免两处各写一份字面量。
+    走 GitHubCommitContent.load_commit_config 这一统一入口 —— 它现在会连带返回
+    branch_success，且默认从权威分支（dev）取回配置。原先本函数另行打开同一文件读一遍，
+    两处口径可能不一致；统一后不复存在。
 
-    读取失败 / 顶层非对象 / 字段缺失 / 字段为空串时，一律回退 fallback，
+    解析不出（配置不可用 / 字段缺失 / 字段为空串）时，一律回退 fallback，
     以保证未登记该字段的既有部署行为不变（调用方传 BranchMigration）。
 
-    :param cfg_path: Commit.json 路径；None = 同目录默认
+    :param cfg_path: 本地 Commit.json 路径；None = 权威副本（dev）优先
     :param fallback: 解析不出 BranchSuccess 时的回退分支
     :return: 分支名（非空字符串）
     """
-    path = cfg_path or os.path.join(
-        _SCRIPT_DIR, GitHubCommitContent.COMMIT_CONFIG_FILE)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
+    cfg = GitHubCommitContent.load_commit_config(cfg_path)
+    if not isinstance(cfg, dict):
         return fallback
-    if not isinstance(data, dict):
-        return fallback
-    value = data.get(COMMIT_JSON_KEY_BRANCH_SUCCESS)
-    value = str(value).strip() if value is not None else ""
-    return value or fallback
+    return (cfg.get("branch_success") or "").strip() or fallback
 
 
-def load_upstream_upload_settings(cfg_path=None):
-    """读取 Upstream.json 的仓库内路径配置（含 CID 前缀路由）；OBS 前缀 / 回调端点
+def load_upstream_upload_settings(cfg_path=None, start_dir=None):
+    """读取分支配置文件的仓库内路径配置（含 CID 前缀路由）；OBS 前缀 / 回调端点
     不在本文件，改由 load_obs_runtime_env() 从环境变量注入
 
-    :param cfg_path: Upstream.json 路径；None = 同目录默认
+    配置文件按约定名 Migration.{当前分支}.json 动态解析；BranchCurrent 不再从文件读取，
+    而由当前 git 分支取得（见 current_branch）。
+
+    :param cfg_path: 配置文件路径；None = 按约定解析
+    :param start_dir: 判定当前分支的起始目录；None = 本脚本所在目录
     :return: (settings, err)：成功时 settings 为
-             dict{upload_file_list_path, branch_current, cid_routes}、err 为 None；
-             失败时 settings 为 None、err 为失败原因
+             dict{upload_file_list_path, branch_current, cid_routes, config_path}、
+             err 为 None；失败时 settings 为 None、err 为失败原因
              cid_routes = [ {prefix, cid}, ... ]，顺序即优先级（先配置先命中）；
              未配置 OBSCIDRoutes 字段时为空列表（全部文件走默认 CID）
     """
-    path = cfg_path or os.path.join(_SCRIPT_DIR, UPSTREAM_JSON)
+    path, branch_current, err = resolve_config_path(cfg_path, start_dir)
+    if path is None:
+        return None, "解析分支配置文件路径失败: %s" % err
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except OSError as e:
-        return None, "读取 %s 失败: %s" % (path, e)
+        return None, "读取 %s 失败: %s（分支 %s 的配置文件按约定名为 %s）" % (
+            path, e, branch_current, CONFIG_NAME_TEMPLATE % branch_current)
     except ValueError as e:
         return None, "%s 不是合法 JSON: %s" % (path, e)
     if not isinstance(data, dict):
         return None, "%s 顶层应为 JSON 对象" % path
+
+    # 历史字段 BranchCurrent：已改为按当前 git 分支动态取得，残留则忽略并告警
+    if JSON_KEY_BRANCH_CURRENT_LEGACY in data:
+        _log("[WARN] %s 中的 %s 已废弃并被忽略：BranchCurrent 现由当前 git 分支"
+             "动态取得（本次 = %s）"
+             % (path, JSON_KEY_BRANCH_CURRENT_LEGACY, branch_current))
 
     def grab(key):
         val = data.get(key)
         return str(val).strip() if val is not None else ""
 
     path_value = grab(JSON_KEY_UPLOAD_FILE_LIST_PATH)
-    branch_current = grab(JSON_KEY_BRANCH_CURRENT)
-    if not (path_value and branch_current):
-        missing = [k for k, v in ((JSON_KEY_UPLOAD_FILE_LIST_PATH, path_value),
-                                  (JSON_KEY_BRANCH_CURRENT, branch_current))
-                   if not v]
-        return None, "%s 缺少字段 %s（不得为空）" % (path, "、".join(missing))
+    if not path_value:
+        return None, "%s 缺少字段 %s（不得为空）" % (path, JSON_KEY_UPLOAD_FILE_LIST_PATH)
 
     # ---- CID 前缀路由：可选；缺省 = 空（全部走默认 CID）----
     routes_value = data.get(JSON_KEY_OBS_CID_ROUTES)
@@ -254,7 +319,8 @@ def load_upstream_upload_settings(cfg_path=None):
 
     return {"upload_file_list_path": path_value,
             "branch_current": branch_current,
-            "cid_routes": cid_routes}, None
+            "cid_routes": cid_routes,
+            "config_path": path}, None
 
 
 def resolve_cid(rel_path, cid_routes=None, default_cid=None):
@@ -395,7 +461,7 @@ def compose_success_content(entries):
 
 
 def load_obs_runtime_env():
-    """从环境变量读取 OBS 运行期配置（原 Upstream.json 的 OBSRootPrefix / CallbackUrl）
+    """从环境变量读取 OBS 运行期配置（原配置文件的 OBSRootPrefix / CallbackUrl）
 
     前缀必填（构造对象 key 需要）；回调端点可选（未设置则上传不携带 x-obs-callback）。
 
@@ -406,17 +472,17 @@ def load_obs_runtime_env():
     callback_url = os.environ.get(ENV_OBS_CALLBACK_URL, "").strip()
     if not root_prefix:
         return None, None, ("缺少环境变量 %s（OBS 对象 key 前缀，必填；"
-                            "该值原为 Upstream.json 的 OBSRootPrefix，已移出配置文件）"
+                            "该值原为配置文件的 OBSRootPrefix，已移出配置文件）"
                             % ENV_OBS_ROOT_PREFIX)
     return root_prefix, callback_url, None
 
 
-def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
+def main(cfg_commit_path=None, cfg_branch_path=None, out_dir=None,
          read_fn=None, commit_fn=None, obs_fn=None):
     """主流程：下载上传清单 → 逐文件 OBS 上传 → 回传成功清单
 
-    :param cfg_commit_path: Commit.json 路径；None = 同目录（便于测试注入）
-    :param cfg_upstream_path: Upstream.json 路径；None = 同目录
+    :param cfg_commit_path: Commit.json 路径；None = 权威副本（dev）优先，取不到用同目录副本
+    :param cfg_branch_path: 分支配置 Migration.{当前分支}.json 路径；None = 按当前 git 分支解析
     :param out_dir: 成功清单本地临时目录；None = 系统临时目录
     :param read_fn: 远端文件读取函数（签名同 GitHubCommitContent.read_file_text）；
                     None = 使用 GitHubCommitContent.read_file_text
@@ -428,7 +494,8 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
     """
     _ensure_console_utf8()
 
-    # ---- 1) 读取配置：Commit.json（身份 / 迁移分支）+ Upstream.json（路径）+ 环境变量（OBS）----
+    # ---- 1) 读取配置：Commit.json（身份 / 迁移分支）+ Migration.{当前分支}.json（路径）
+    #          + 环境变量（OBS）----
     identity, err = load_commit_identity(cfg_commit_path)
     if identity is None:
         _log("[FAIL] %s" % err)
@@ -439,19 +506,23 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
     # 未登记该字段时回退 BranchMigration，保持原有行为
     branch_success = load_success_branch(cfg_commit_path,
                                          fallback=branch_migration)
-    settings, err = load_upstream_upload_settings(cfg_upstream_path)
+    settings, err = load_upstream_upload_settings(cfg_branch_path)
     if settings is None:
         _log("[FAIL] %s" % err)
         return 1
     upload_path = settings["upload_file_list_path"]
     branch_current = settings["branch_current"]
     cid_routes = settings["cid_routes"]
+    config_path = settings["config_path"]
     root_prefix, callback_url, env_err = load_obs_runtime_env()
     if env_err is not None:
         _log("[FAIL] %s" % env_err)
         return 1
-    _log("[INFO] 目标仓库 = %s/%s | 迁移分支 = %s（BranchMigration）| Branch 目录段 = %s"
-          % (owner, repo, branch_migration, branch_current))
+    _log("[INFO] 目标仓库 = %s/%s | 迁移分支 = %s（BranchMigration）"
+          % (owner, repo, branch_migration))
+    _log("[INFO] 当前分支（BranchCurrent）= %s（取自当前 git 检出，决定配置文件名）"
+          % branch_current)
+    _log("[INFO] 分支配置 = %s" % config_path)
     _log("[INFO] 成功清单回传分支 = %s（Commit.json 的 %s%s）"
           % (branch_success, COMMIT_JSON_KEY_BRANCH_SUCCESS,
              "" if branch_success != branch_migration
