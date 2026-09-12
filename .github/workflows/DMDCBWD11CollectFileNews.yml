@@ -1,23 +1,5 @@
 name: DMDCBWD11CollectFileNews
 
-# ⚠️ 这是 branch-template 模板分支上的**工作流模板**：文件名里的 {BRANCH_PASCAL}、正文里的
-#    {BRANCH} 与 {CRON_COLLECT} 都是占位符 —— 在模板分支上它不会运行、也不该运行
-#    （占位符不是合法分支名，{CRON_COLLECT} 也不是合法 cron，GitHub 会判本文件无效）。
-#    新建独立分支时按 .github/BRANCH_TEMPLATE.md 的清单逐一替换。
-#
-# DMDCBWD11CollectFile：收集仓库数据文件清单 -> 上传远端 BranchMigration（Migration）
-# （执行所选分支下 .github/Python/DMDCBWD11CollectFile.py；命名沿革：
-#   UpstreamFile.py → Migration11UpstreamFile.py → DMDCBWD11CollectFile.py）
-#
-# 触发方式：
-#   1. 定时：每天自动触发一次（cron 为占位符 {CRON_COLLECT} —— 换成**本分支独占**的时段，
-#      已占用的时段见 .github/BRANCH_TEMPLATE.md 的「时段分配」一节）。
-#      排期约定：11 系列（采集）先跑，31 系列（迁移）晚 2 小时；同系列各分支共用
-#      concurrency 组 "DMDCBWD11-collect" **串行执行**（排队而非并发）；各分支 cron 相互错开。
-#      注意：schedule 只在仓库【默认分支】上已存在的工作流文件生效 —— 本文件放在分支上，
-#      它自己的 schedule 是**死的**；真正驱动定时的是 dev 上的同名副本。
-#   2. 手动：workflow_dispatch，可在 Run workflow 面板输入/选择要执行的具体分支
-#      （默认 {BRANCH}；该分支需包含 DMDCBWD11CollectFile.py 及同目录依赖模块）。
 on:
   schedule:
     - cron: '45 18 * * *'
@@ -29,10 +11,6 @@ on:
         required: false
         default: 'news'
 
-# 串行化：与同系列其它分支**共用同一个组名** —— 同一时刻只跑一个，其余排队等待
-# （cancel-in-progress: false = 排队，而不是取消已在跑的那个）。
-# 注意：GitHub 对同一 concurrency 组只保留「1 个运行中 + 1 个待运行」；若前一个跑得过久、
-# 下一个又到点，待运行的那个会被新来的顶掉 —— 靠各分支 cron 错峰规避。
 concurrency:
   group: DMDCBWD11-collect
   cancel-in-progress: false
@@ -41,7 +19,7 @@ jobs:
   DMDCBWD11CollectFile:
     runs-on: ubuntu-latest
     steps:
-      # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 {BRANCH}
+      # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 news
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch || 'news' }}
