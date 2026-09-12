@@ -1,0 +1,104 @@
+name: PullTestDataFiles
+
+# 用途：手动把【源仓库某分支】Data 目录下的测试数据（默认 *.json、*.mvsv、*.log），按
+#       **原路径**复制到【本仓某分支】的相同路径，作为测试数据使用 —— 省去手工下载再上传，
+#       也不必等真实数据。
+#
+#       ⚠️ 源与目标**可以是两个不同的仓库**：
+#          源   默认 ACANX/Distribution（另一个仓库，只读）
+#          目标 本仓（acdnx/Distribution，身份取自 .github/Python/Commit.json）
+#
+# 触发：仅 workflow_dispatch（手动）。workflow_dispatch 要求工作流文件存在于**默认分支**，
+#       故本文件与脚本都随默认分支（dev）存放。
+#
+# 实现：不 clone 仓库（仓库较大，clone 一次要拉完整目录树，而测试数据往往只有几十个文件）。
+#       全程走 GitHub REST API：
+#         ① Git Trees API 一次取回两侧完整文件清单（含每个文件的 blob sha）；
+#         ② 比对 blob sha —— 相同即内容逐字节相同，直接跳过（不下载、不提交）。
+#            blob sha 只由内容决定，所以**跨仓库比对同样成立**；
+#         ③ 仅对新增/内容不同的文件走源仓库的 Git Blobs API 取原始字节；
+#         ④ 走目标仓库的 Git Data API 打包成**一个提交**：
+#            blobs → trees（以目标分支当前树为 base_tree）→ commits → 移动分支指针。
+#            建 blob 时即比对服务端 sha 与源 sha，不一致就整批中止，错误内容不落地。
+#       脚本：.github/Python/PullTestDataFiles.py（同分支同目录）。
+#
+# 安全性：
+#   - 只新增/覆盖匹配到的文件，**从不删除**目标分支上的任何文件；
+#   - 分支指针只允许快进（force=false）：目标分支若在运行期间被别处改动，本次不被覆盖；
+#   - 失败即整批不落地：任一文件出错都在建提交之前中止，目标分支保持原样；
+#   - 源与目标是同一仓库的同一分支时脚本直接失败退出（避免误判为同步成功）；
+#   - 提交信息不带 [skip ci]：本仓没有按 Data/ 推送触发的工作流（采集走 cron），无需抑制。
+#
+# 权限：写入使用 GIT_COMMIT_TOKEN，故本工作流的 GITHUB_TOKEN 只需读权限。源仓库按只读
+#       访问，令牌对它无写权限要求（源为公开仓库时，即使令牌未覆盖它也能读）。
+on:
+  workflow_dispatch:
+    inputs:
+      source_owner:
+        description: 源仓库属主（另一个仓库）
+        type: string
+        required: false
+        default: ACANX
+      source_repo:
+        description: 源仓库名
+        type: string
+        required: false
+        default: Distribution
+      source_branch:
+        description: 源分支（从它的 Data 目录拉取）
+        type: string
+        required: true
+        default: quote
+      target_branch:
+        description: 目标分支（本仓，写到它的相同路径）
+        type: string
+        required: true
+      pattern:
+        description: 搬运哪些后缀（文件名通配，多个用逗号分隔）
+        type: string
+        required: false
+        default: '*.json,*.mvsv,*.log'
+      dry_run:
+        description: 只列出同步计划、不写入
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+# 串行化：同一目标分支同时跑两次会因 sha 冲突互相顶掉，故按目标分支串行
+concurrency:
+  group: PullTestDataFiles-${{ inputs.target_branch }}
+  cancel-in-progress: false
+
+jobs:
+  PullTestDataFiles:
+    runs-on: ubuntu-latest
+    steps:
+      # 固定检出 dev：本工作流与脚本都随默认分支存放，这样无论从哪个 ref 触发，
+      # 跑的都是同一份脚本（与「工具类脚本的家在 dev」这一约定一致）
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: RunPullTestDataFiles
+        env:
+          # 必填：GitHub 写仓库令牌（向目标分支提交测试数据用）
+          GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="--dry-run"
+          fi
+          python3 .github/Python/PullTestDataFiles.py \
+            --source-owner "${{ inputs.source_owner }}" \
+            --source-repo "${{ inputs.source_repo }}" \
+            --source-branch "${{ inputs.source_branch }}" \
+            --target-branch "${{ inputs.target_branch }}" \
+            --pattern "${{ inputs.pattern }}" \
+            $ARGS
