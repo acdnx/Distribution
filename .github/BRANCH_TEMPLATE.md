@@ -96,12 +96,26 @@ git add .github/workflows/DMDCBWD11CollectFile$PASCAL.yml \
         .github/workflows/DMDCBWD31MigrationFile$PASCAL.yml
 ```
 
-两份**必须与分支上逐字节一致**（这是本仓约定：同一份内容不存两份会漂移的副本）：
+**两边不要求逐字节一致，但下面这几项必须一致**（它们决定工作流「跑不跑、跟谁排队」）：
+
+| 必须一致 | 不一致的后果 |
+| --- | --- |
+| `on.schedule[].cron` | 从分支 `workflow_dispatch` 手动触发时用的就是它 |
+| `concurrency.group` | 写错就不是同一个组 —— 会**与同系列其它分支并发跑**，串行化白做 |
+| `workflow_dispatch.inputs.branch.default`、`jobs.*.steps[0].with.ref` | 都必须是本分支名 |
 
 ```bash
-cmp .github/workflows/DMDCBWD11CollectFile$PASCAL.yml \
-    <分支>/.github/workflows/DMDCBWD11CollectFile$PASCAL.yml && echo 一致
+# 关键配置逐项比对，别只靠肉眼
+for f in DMDCBWD11CollectFile$PASCAL DMDCBWD31MigrationFile$PASCAL; do
+  diff <(grep -E 'cron:|group:|cancel-in-progress:|default:|ref:' .github/workflows/$f.yml) \
+       <(grep -E 'cron:|group:|cancel-in-progress:|default:|ref:' <分支>/.github/workflows/$f.yml) \
+    && echo "$f 关键配置一致 ✓"
+done
 ```
+
+> ⚠️ **别把分支副本当权威。** `schedule` 只读默认分支，分支副本**不参与定时**，长期没人
+> 碰就会悄悄滞后 —— `quote` / `quote-gold` 的分支副本就曾整整落后一代（11 系列 cron 还是
+> `0 20`、完全没有 `concurrency` 块）。**要判断某分支的现行配置，看 `dev`。**
 
 > 本仓 `cnxnc` 对 `acdnx/Distribution` **只有读权限**，任何改动都走 **Fork PR**，
 > 从上游拉特性分支、推到 Fork、向上游开 PR（不要动 Fork 上的同名镜像分支）。
@@ -118,11 +132,14 @@ cron **相互错开**，避免同一时刻一起起跑。
 | --- | --- | --- |
 | `quote` | `0 18 * * *`（北京 02:00） | `0 20 * * *`（北京 04:00） |
 | `quote-gold` | `15 18 * * *`（北京 02:15） | `15 20 * * *`（北京 04:15） |
-| `datatest` | `30 18 * * *`（北京 02:30） | `30 20 * * *`（北京 04:30） |
-| **下一个可用** | **`45 18 * * *`（北京 02:45）** | **`45 20 * * *`（北京 04:45）** |
+| `news` | `45 18 * * *`（北京 02:45） | `45 20 * * *`（北京 04:45） |
+| **下一个可用** | **`30 18 * * *`（北京 02:30）** | **`30 20 * * *`（北京 04:30）** |
 
-新分支取下一个空档（如 `45 18` / `45 20`），并把上表补一行 —— **本文件在模板分支上，
-新分支里也有一份，记得同步更新**。
+新分支取「下一个可用」那一档；取走后把该行改成新分支名，再把「下一个可用」换成再下一档
+—— **本文件在模板分支上，新分支里也有一份，记得同步更新**。
+
+> `30 18` / `30 20` 这一档**暂时还被一个待删除的分支占着**（`datatest`，已决定删除）。
+> 它真正删掉之前**先别占这一档** —— 会跟它撞进同一个 concurrency 组排队。
 
 > GitHub 对同一 concurrency 组只保留「1 个运行中 + 1 个待运行」，若前一个跑得过久、
 > 下一个又到点，待运行的那个会被新来的顶掉 —— 靠错峰规避，所以**别把时间挤在一起**。
@@ -137,7 +154,8 @@ cron **相互错开**，避免同一时刻一起起跑。
 - [ ] 两份工作流的 `default:` 与 `ref: ... || '...'` 都是 `<new>`
 - [ ] 两份工作流的文件名与 `name:` 都是 `<Pascal>` 形式
 - [ ] `grep -rn '{BRANCH\|{CRON' . --exclude-dir=.git --exclude=BRANCH_TEMPLATE.md` 无输出
-- [ ] `dev` 上的两份副本与分支上的 `cmp` 逐字节一致
+- [ ] `dev` 副本与分支副本的**关键配置一致**（`cron` / `concurrency.group` / `default` /
+      `ref`），用「三、」里那段 `for … diff …` 比对通过
 - [ ] 手动触发一次 **11 系列**（`workflow_dispatch`，选新分支），日志里
       `[INFO] 当前分支（BranchCurrent）= <new>`、`远端落点 = Branch/<new>/UploadFileList_….jsonl`
 - [ ] 手动触发一次 **31 系列**，确认能取到上一步的分片并上传
@@ -154,12 +172,11 @@ cron **相互错开**，避免同一时刻一起起跑。
    source_owner=ACANX  source_repo=Distribution  source_branch=quote
    target_branch=<new>  pattern=*.json,*.mvsv,*.log
    ```
-3. **`.log` 目前不在采集范围内**：`UpstreamFileList.DATA_EXTENSIONS = (".json", ".jsonl", ".mvsv")`，
-   没有 `.log`。`Data/` 下的 `.log` 不会被 11 系列采集、也不会被上传。要让它参与流程，
-   得先把这个常量改成 `(".json", ".jsonl", ".mvsv", ".log")`（那是**全分支共识**的改动，
-   须在所有分支同步，别只改一个）。
+3. **`.log` 已在采集范围内**：`UpstreamFileList.DATA_EXTENSIONS = (".json", ".jsonl", ".mvsv", ".log")`，
+   `Data/` 下的 `.log` 会走 11 系列采集与 31 系列上传。**这个常量属全分支共识项，各分支
+   必须一致，别只改一个分支。**
 4. **`OBSCIDRoutes` 是可选字段**：模板里的配置**没有**它 —— 不配即所有文件走默认 CID。
-   需要按路径前缀路由到不同 CID 时，照 `datatest` 的写法加：
+   需要按路径前缀路由到不同 CID 时，照 `quote` 的写法加：
    ```json
    {
      "UploadFileListPath": "Branch/<new>/UploadFileList.jsonl",
@@ -178,5 +195,5 @@ cron **相互错开**，避免同一时刻一起起跑。
    第 3 行的 `*.log` 来自 Node 模板，会把 `Data/` 下的 `.log` **静默挡在提交之外**。
    走 GitHub API 提交（采集/上传/PullTestDataFiles 都是）不受 `.gitignore` 约束，所以
    流水线一直没暴露这个问题；但**任何本地 `git add` 都会漏掉它们**，且不报任何错。
-   本模板因此加了一条例外。**其它分支（`dev` / `quote` / `quote-gold` / `datatest`）目前
-   还没有这条例外** —— 建议同步补上，否则在那些分支上本地提交 `.log` 同样会被静默跳过。
+   本模板因此加了一条例外。`quote` / `quote-gold` / `news` 都已带上它；**`dev` 还没有** ——
+   不过 `dev` 上不存数据（`Data/` 只存在于各独立分支），影响有限。
