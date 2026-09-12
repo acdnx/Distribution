@@ -41,6 +41,13 @@ UpstreamFileList —— 扫描仓库收集上游数据文件相对路径清单�
     paths = UpstreamFileList.collect(extensions=(".json", ".txt"))  # 覆盖默认后缀清单
     paths = UpstreamFileList.collect(repo_root="D:/other/repo")     # 显式指定扫描根目录
 
+【示例 4：连同每个文件的内容哈希一起收集（供清单写成三元组用）】
+
+    entries = UpstreamFileList.collect_with_digests()
+    # list[dict]，每项 {"rel_path": ..., "sha1": ..., "md5": ...}，哈希为大写 hex
+    for e in entries:
+        print("%s|%s|%s" % (e["sha1"], e["md5"], e["rel_path"]))
+
 三、采集语义
 ----------------------------------------------------------------------------------------
     - 默认后缀清单见模块常量 DATA_EXTENSIONS = (".json", ".jsonl", ".mvsv")，
@@ -72,6 +79,7 @@ UpstreamFileList —— 扫描仓库收集上游数据文件相对路径清单�
       请以 exclude_hidden=False 调用（.git 仍会被跳过）。
 """
 
+import hashlib
 import os
 import sys
 
@@ -86,6 +94,10 @@ DATA_EXTENSIONS = (".json", ".jsonl", ".mvsv")
 # 遍历时始终跳过的目录名（无论是否开启隐藏目录排除）
 # 注意：.git 属隐藏目录，本会被"隐藏目录一律跳过"覆盖；此处保留为显式兜底。
 DEFAULT_SKIP_DIRS = (".git", "__pycache__")
+
+# 计算文件内容哈希（file_digests / collect_with_digests）时的分块大小：1 MiB。
+# 分块读取使内存占用与文件大小无关，可安全处理大文件。
+DIGEST_CHUNK_SIZE = 1 << 20
 
 
 def _script_dir():
@@ -178,6 +190,50 @@ def collect(repo_root=None, extensions=None, skip_dirs=None, exclude_hidden=True
     # 5) 字典序排序，保证清单稳定可 diff
     result.sort()
     return result
+
+
+def file_digests(abs_path, chunk_size=DIGEST_CHUNK_SIZE):
+    """计算单个文件【内容】的 SHA1 与 MD5（均为大写 hex）
+
+    分块读取，避免大文件一次性载入内存；空文件同样返回其哈希（不会返回 None）。
+
+    :param abs_path: 文件绝对路径
+    :param chunk_size: 每次读取的字节数；缺省 DIGEST_CHUNK_SIZE（1 MiB）
+    :return: (sha1_hex_upper, md5_hex_upper)
+    :raises OSError: 文件不可读时抛出（由调用方决定如何处理）
+    """
+    sha1 = hashlib.sha1()
+    md5 = hashlib.md5()
+    with open(abs_path, "rb") as fh:
+        while True:
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                break
+            sha1.update(chunk)
+            md5.update(chunk)
+    return sha1.hexdigest().upper(), md5.hexdigest().upper()
+
+
+def collect_with_digests(repo_root=None, extensions=None, skip_dirs=None,
+                         exclude_hidden=True):
+    """在 collect() 清单的基础上，为每个文件附带【内容】哈希（SHA1 / MD5，大写 hex）
+
+    扫描范围、排序与排除规则完全复用 collect()，区别仅在于额外读取每个文件内容
+    计算哈希，故耗时与文件总大小正相关。
+
+    :param repo_root: 同 collect()
+    :param extensions: 同 collect()
+    :param skip_dirs: 同 collect()
+    :param exclude_hidden: 同 collect()
+    :return: list[dict]，每项 {"rel_path": 相对路径, "sha1": 大写 hex, "md5": 大写 hex}；
+             顺序与 collect() 一致（按路径字典序）；仓库根未找到或无匹配文件时为空列表
+    """
+    root = os.path.abspath(repo_root) if repo_root else _repo_root()
+    entries = []
+    for rel_path in collect(root, extensions, skip_dirs, exclude_hidden):
+        sha1_hex, md5_hex = file_digests(os.path.join(root, rel_path))
+        entries.append({"rel_path": rel_path, "sha1": sha1_hex, "md5": md5_hex})
+    return entries
 
 
 if __name__ == "__main__":
