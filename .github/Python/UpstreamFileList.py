@@ -41,7 +41,7 @@ UpstreamFileList —— 扫描仓库收集上游数据文件相对路径清单�
     paths = UpstreamFileList.collect(extensions=(".json", ".txt"))  # 覆盖默认后缀清单
     paths = UpstreamFileList.collect(repo_root="D:/other/repo")     # 显式指定扫描根目录
 
-【示例 4：连同每个文件的内容哈希一起收集（供清单写成三元组用）】
+【示例 4：连同每个文件的内容哈希一起收集（供清单写成 JSONL 用）】
 
     entries = UpstreamFileList.collect_with_digests()
     # list[dict]，每项 {"rel_path": ..., "sha1": ..., "md5": ...}，哈希为大写 hex
@@ -75,7 +75,7 @@ UpstreamFileList —— 扫描仓库收集上游数据文件相对路径清单�
       如需绝对路径可用 os.path.join(repo_root, rel) 还原（Windows 下 “/” 同样可 open）；
     - 仓库中找不到 .git 入口（不在任何 Git 仓库内）时返回空列表，不抛异常；
     - 默认已排除隐藏目录（.github 等），故仓库自身的 *.json 配置文件
-      （如 .github/Python/Upstream.json）不会进清单；若要采集隐藏目录下的文件，
+      （如 .github/Python/Migration.{当前分支}.json）不会进清单；若要采集隐藏目录下的文件，
       请以 exclude_hidden=False 调用（.git 仍会被跳过）。
 """
 
