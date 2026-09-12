@@ -1,7 +1,4 @@
 {
-  "TargetBranch": "quote",
-  "BranchMigration": "Migration",
-  "BranchCurrent": "quote-gold",
   "UploadFileListPath": "Branch/quote-gold/UploadFileList.txt",
   "OBSCIDRoutes": [
     { "FilePrefix": "Data/Demo/", "CID": "3501806882199176893" },
