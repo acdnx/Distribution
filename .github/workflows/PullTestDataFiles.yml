@@ -1,7 +1,7 @@
 name: PullTestDataFiles
 
-# 用途：手动把某个分支 Data 目录下的测试数据（默认 *.json），按**原路径**复制到另一个
-#       分支的相同路径，作为测试数据使用 —— 省去手工下载再上传，也不必等真实数据。
+# 用途：手动把某个分支 Data 目录下的测试数据（默认 *.json、*.mvsv），按**原路径**复制到
+#       另一个分支的相同路径，作为测试数据使用 —— 省去手工下载再上传，也不必等真实数据。
 #
 # 触发：仅 workflow_dispatch（手动）。workflow_dispatch 要求工作流文件存在于**默认分支**，
 #       故本文件与脚本都随默认分支（dev）存放。
@@ -42,6 +42,11 @@ on:
         type: boolean
         required: false
         default: false
+      pattern:
+        description: 搬运哪些后缀（文件名通配，多个用逗号分隔）
+        type: string
+        required: false
+        default: '*.json,*.mvsv'
 
 permissions:
   contents: read
@@ -77,4 +82,5 @@ jobs:
           python3 .github/Python/PullTestDataFiles.py \
             --source "${{ inputs.source_branch }}" \
             --target "${{ inputs.target_branch }}" \
+            --pattern "${{ inputs.pattern }}" \
             $ARGS

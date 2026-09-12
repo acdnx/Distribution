@@ -7,6 +7,9 @@
     容易漏文件、改路径。本脚本把【源分支】Data 目录下匹配的文件，按**原路径**复制到
     【目标分支的相同路径】，作为测试数据直接使用。
 
+    默认搬运 *.json 与 *.mvsv 两种后缀（按文件名匹配，不限目录深度）；要搬运其它
+    后缀用 --pattern 覆盖，多个模式用英文逗号分隔。
+
 为什么不 clone
     仓库体积大，即便 --depth 1 也会拉下完整目录树；而测试数据通常只有十几个文件，
     为此 clone 一次不划算。故本脚本全程走 GitHub REST API，**不开工作树、不做检出**：
@@ -54,6 +57,7 @@
 用法
     python3 .github/Python/PullTestDataFiles.py --source datatest --target quote
     python3 .github/Python/PullTestDataFiles.py --source datatest --target quote --dry-run
+    python3 .github/Python/PullTestDataFiles.py --source datatest --target quote --pattern '*.json'
 
 环境变量
     GIT_COMMIT_TOKEN —— 需目标仓库写权限；缺失即失败退出（不静默降级为只读）。
@@ -88,7 +92,8 @@ ENV_TOKEN = "GIT_COMMIT_TOKEN"
 DEFAULT_PATH_PREFIX = "Data"
 
 #: 默认匹配哪些文件（按**文件名**匹配，不含目录段，故任意深度都覆盖）
-DEFAULT_PATTERN = "*.json"
+#: 多个模式用英文逗号分隔
+DEFAULT_PATTERN = "*.json,*.mvsv"
 
 #: 单次 HTTP 请求超时秒数
 DEFAULT_TIMEOUT = 30
@@ -459,12 +464,28 @@ def update_ref(api_base, owner, repo, branch, commit_sha, token, timeout):
 # 比对
 # ---------------------------------------------------------------------------
 
-def select_source_files(entries, path_prefix, pattern):
-    """从文件清单里挑出「位于 path_prefix 目录下、且文件名匹配 pattern」的文件
+def parse_patterns(spec):
+    """把逗号分隔的模式串拆成模式列表
+
+    允许一次匹配多种后缀（如 "*.json,*.mvsv"），便于测试数据混有多种扩展名时一并搬运。
+
+    :param spec: 模式串，逗号分隔
+    :return: 去空、去重后的模式列表（保持出现顺序）
+    """
+    patterns = []
+    for part in (spec or "").split(","):
+        p = part.strip()
+        if p and p not in patterns:
+            patterns.append(p)
+    return patterns
+
+
+def select_source_files(entries, path_prefix, patterns):
+    """从文件清单里挑出「位于 path_prefix 目录下、且文件名匹配任一 pattern」的文件
 
     :param entries: fetch_tree 返回的 {路径: (sha, 字节数)}
     :param path_prefix: 目录前缀（如 "Data"），只取它**内部**的文件
-    :param pattern: 文件名通配（如 "*.json"）；只比对最后一段，不含路径
+    :param patterns: 文件名通配列表（如 ["*.json", "*.mvsv"]）；只比对最后一段，不含路径
     :return: (matched, ignored) —— matched 为按路径排序的 list[dict]；
              ignored 为命中目录但文件名不匹配的路径列表
     """
@@ -474,7 +495,7 @@ def select_source_files(entries, path_prefix, pattern):
         if not path.startswith(head + "/"):
             continue
         name = path.rsplit("/", 1)[-1]
-        if not fnmatch.fnmatchcase(name, pattern):
+        if not any(fnmatch.fnmatchcase(name, p) for p in patterns):
             ignored.append(path)
             continue
         sha, size = entries[path]
@@ -520,7 +541,7 @@ def build_parser():
     parser.add_argument("--path-prefix", default=DEFAULT_PATH_PREFIX,
                         help="源目录前缀，默认 %s" % DEFAULT_PATH_PREFIX)
     parser.add_argument("--pattern", default=DEFAULT_PATTERN,
-                        help="文件名通配（不含目录段），默认 %s" % DEFAULT_PATTERN)
+                        help="文件名通配，多个用逗号分隔，默认 %s" % DEFAULT_PATTERN)
     parser.add_argument("--dry-run", action="store_true",
                         help="只输出同步计划，不写入任何文件")
     parser.add_argument("--api-base", default=DEFAULT_API_BASE,
@@ -577,6 +598,11 @@ def main(argv=None):
     if not prefix:
         _log("[FAIL] 目录前缀不得为空")
         return 1
+    patterns = parse_patterns(args.pattern)
+    if not patterns:
+        _log("[FAIL] 文件匹配模式不得为空（--pattern，多个用逗号分隔）")
+        return 1
+    pattern_label = "、".join(patterns)
 
     token = (os.environ.get(ENV_TOKEN) or "").strip()
     if not token:
@@ -591,7 +617,7 @@ def main(argv=None):
         return 1
 
     _log("[INFO] 仓库 = %s/%s | 源分支 = %s | 目标分支 = %s | 目录 = %s/ | 匹配 = %s"
-         % (owner, repo, source, target, prefix, args.pattern))
+         % (owner, repo, source, target, prefix, pattern_label))
     _log("[INFO] 模式 = %s" % ("dry-run（只列计划、不写入）" if args.dry_run else "实际同步"))
 
     # ---- 2) 两侧清单 ----
@@ -607,14 +633,14 @@ def main(argv=None):
          % (source, len(source_tree), target, len(target_tree)))
 
     # ---- 3) 挑选与比对 ----
-    matched, ignored = select_source_files(source_tree, prefix, args.pattern)
+    matched, ignored = select_source_files(source_tree, prefix, patterns)
     if ignored:
         shown = "、".join(ignored[:5]) + ("…" if len(ignored) > 5 else "")
         _log("[INFO] %s/ 下有 %d 个文件不匹配 %s，已忽略：%s"
-             % (prefix, len(ignored), args.pattern, shown))
+             % (prefix, len(ignored), pattern_label, shown))
     if not matched:
         _log("[INFO] %s/ 下没有匹配 %s 的文件，正常结束（未做任何改动）"
-             % (prefix, args.pattern))
+             % (prefix, pattern_label))
         return 0
 
     to_copy, identical = plan_sync(matched, target_tree)
