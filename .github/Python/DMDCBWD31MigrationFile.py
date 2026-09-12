@@ -27,7 +27,9 @@ DMDCBWD31MigrationFile —— 下载上传清单 → 逐文件 OBS 上传 → �
          （设置了回调端点，PUT 才携带 x-obs-callback 头），由 OBS 在对象落盘成功后
          【服务端原生回调】该端点（回调体含仓库上下文 + OBS 系统变量，
          见 OBSClient 模块说明）；
-    4. 汇总上传成功的文件，一行一个写入本地临时 txt；
+    4. 汇总上传成功的文件，一行一个写入本地临时 txt（与上传清单同一口径：
+       四元组条目原样回写 {最后修改时间}|{SHA1}|{MD5}|{相对路径}，历史格式条目
+       仍只写相对路径——详见 compose_success_content）；
     5. 调用 GitHubCommitContent.commit_content_file 将该成功清单回传到远端
        Branch/{BranchCurrent}/UploadSuccessList_yyyyMMdd_HHmmssSSS_{MD5}.txt
        （提交分支 = Commit.json 的 BranchSuccess【成功清单专用分支】；
@@ -307,9 +309,14 @@ def _now_tag():
 def _log(message):
     """带 yyMMdd.HHmmss.SSS 时间前缀的日志输出（走 stdout）
 
+    flush=True 不可省：CI 里 stdout 是管道、非 TTY，Python 默认块缓冲，日志会攒到
+    进程结束才一次性写出，导致 GitHub 侧的接收时间戳全部挤在同一秒、与实际产出时刻
+    相差几十秒（本文件此前就出现过整段日志挤在 05:00:41 的现象）。逐行 flush 后，
+    日志行的接收时间与行内 [yyMMdd.HHmmss.SSS] 前缀才能对上。
+
     :param message: 日志内容（可含 [INFO]/[PASS]/[FAIL] 等分级前缀）
     """
-    print("[%s] %s" % (_now_tag(), message))
+    print("[%s] %s" % (_now_tag(), message), flush=True)
 
 
 def parse_manifest_lines(text):
@@ -348,6 +355,43 @@ def parse_manifest_lines(text):
             "mtime": (mtime or "").strip() or None,
         })
     return entries
+
+
+def entry_has_hash(entry):
+    """判断条目是否带四元组信息（时间戳 / SHA1 / MD5 任一非空）
+
+    历史格式（仅路径）的条目三者均为 None；四元组条目三者应齐备，但为容忍
+    上游产出残缺（如 {时间戳}||{MD5}|{路径}），此处按“任一非空”判定。
+
+    :param entry: parse_manifest_lines 的条目 dict
+    :return: bool
+    """
+    return bool(entry.get("mtime") or entry.get("sha1") or entry.get("md5"))
+
+
+def compose_success_content(entries):
+    """把上传成功的条目拼成“一行一个”的成功清单文本（UTF-8，LF 换行，末行带换行）
+
+    与上传清单（UploadFileList）同一口径，便于下游按同一套规则解析：
+        - 四元组条目 → 原样回写 {最后修改时间}|{SHA1}|{MD5}|{相对路径}
+          （缺失的字段留空，不写 "None"）；
+        - 历史格式条目 → 仍只写相对路径（该条目本就没有哈希可回写）。
+
+    :param entries: 上传成功的条目列表（parse_manifest_lines 的元素）
+    :return: 待写入 txt 的完整文本；entries 为空返回空字符串
+    """
+    if not entries:
+        return ""
+    lines = []
+    for entry in entries:
+        if entry_has_hash(entry):
+            lines.append("%s|%s|%s|%s" % (entry.get("mtime") or "",
+                                          entry.get("sha1") or "",
+                                          entry.get("md5") or "",
+                                          entry["rel_path"]))
+        else:
+            lines.append(entry["rel_path"])
+    return "\n".join(lines) + "\n"
 
 
 def load_obs_runtime_env():
@@ -447,7 +491,7 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
         return 1
 
     obs = obs_fn or OBSClient.upload_file
-    ok_paths, missing_count, fail_count = [], 0, 0
+    ok_entries, missing_count, fail_count = [], 0, 0
     for entry in entries:
         rel_path = entry["rel_path"]
         local_file = os.path.join(root, rel_path)
@@ -470,22 +514,27 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
                      sha1=digest_sha1, md5=digest_md5, root_prefix=root_prefix,
                      cid=cid_value, callback_url=callback_url)
         if isinstance(result, dict) and result.get("success"):
-            ok_paths.append(rel_path)
+            ok_entries.append(entry)
             _log("[上传成功] [%s] %s" % (cid_value, rel_path))
         else:
             fail_count += 1
             message = result.get("message") if isinstance(result, dict) else result
             _log("[上传失败] %s -> %s" % (rel_path, message))
     _log("[INFO] 汇总：共 %d 个 | 成功 %d | 本地缺失 %d | 上传失败 %d"
-          % (len(entries), len(ok_paths), missing_count, fail_count))
+          % (len(entries), len(ok_entries), missing_count, fail_count))
 
     # ---- 4) 无成功文件：正常结束（无需回传成功清单）----
-    if not ok_paths:
+    if not ok_entries:
         _log("[INFO] 无上传成功的文件，跳过回传 UploadSuccessList")
         return 0
 
     # ---- 5) 成功清单一行一个写本地临时 txt，并回传远端 ----
-    content = "\n".join(ok_paths) + "\n"
+    # 与上传清单同一口径：四元组条目原样回写四元组，历史格式条目仍只写路径
+    content = compose_success_content(ok_entries)
+    hash_rows = sum(1 for e in ok_entries if entry_has_hash(e))
+    _log("[INFO] 成功清单 %d 行：%d 行四元组 {最后修改时间}|{SHA1}|{MD5}|{路径}，"
+          "%d 行历史格式仅含路径"
+          % (len(ok_entries), hash_rows, len(ok_entries) - hash_rows))
     digest = _md5_hex_upper(content.encode("utf-8"))
     file_name = "%s_%s_%s.txt" % (SUCCESS_FILE_PREFIX, _build_timestamp(), digest)
     path_key = "%s/%s/%s" % (REMOTE_BASE_DIR, branch_current, file_name)
@@ -509,8 +558,8 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
             pass
 
     if isinstance(result, dict) and result.get("success"):
-        _log("[PASS] 成功清单已回传 %s/%s 分支 %s：%s（http_status=%s）"
-              % (owner, repo, branch_success, path_key, result.get("http_status")))
+        _log("[PASS] 成功清单已回传[HTTPStatus:%s] https://github.com/%s/%s/blob/%s/%s"
+              % (result.get("http_status"), owner, repo, branch_success, path_key))
         return 0
     message = result.get("message") if isinstance(result, dict) else result
     _log("[FAIL] 成功清单回传失败（目标分支 %s）: %s" % (branch_success, message))
