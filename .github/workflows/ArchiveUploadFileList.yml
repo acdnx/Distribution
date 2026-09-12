@@ -1,10 +1,12 @@
 name: ArchiveUploadFileList
 
-# 用途：排空「待上传队列」Branch/{branch}/UploadFileList.txt ——
+# 用途：排空「待上传队列」Branch/{branch}/UploadFileList.jsonl ——
 #       把【已确认上传成功】的行移出队列，并归档到
-#           Migration:Archive/{branch}/ArchiveUploadFileList_yyyyMMddHHmmss.txt
+#           Migration:Archive/{branch}/ArchiveUploadFileList_yyyyMMddHHmmss.jsonl
 #
-#       归档逻辑在 .github/Python/ArchiveUploadFileList.py（本步骤只调用它）。
+#       归档逻辑在 .github/Python/ArchiveUploadFileList.py —— 该脚本**存放在
+#       Migration 分支**：本工作流检出 Migration 后从该检出执行它，使脚本与它操作的
+#       Branch/ 队列同处一个分支（否则本步骤会找不到脚本）。本步骤只调用它。
 #
 # 为什么需要它：队列来自采集（每天全量扫描后聚合），而已上传成功的源文件会被
 #   OBS 回调（Cloudflare Worker）从原分支删除。若不排空，队列里会长期堆积

@@ -1,0 +1,41 @@
+name: DMDCBWD11CollectFileDatatest
+
+# DMDCBWD11CollectFile：收集仓库数据文件清单 -> 上传远端 BranchMigration（Migration）
+# （执行所选分支下 .github/Python/DMDCBWD11CollectFile.py；命名沿革：
+#   UpstreamFile.py → Migration11UpstreamFile.py → DMDCBWD11CollectFile.py）
+#
+# 触发方式：
+#   1. 定时：每天自动触发一次（cron 0 20 * * * = 每天 20:00 UTC = 北京时间次日
+#      凌晨 04:00）。注意：schedule 只在仓库【默认分支】上已存在的工作流文件生效，
+#      请确保本文件已合入默认分支（如 main）。
+#   2. 手动：workflow_dispatch，可在 Run workflow 面板输入/选择要执行的具体分支
+#      （默认 datatest；该分支需包含 DMDCBWD11CollectFile.py 及同目录依赖模块）。
+on:
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 选择要执行工作流的分支（需包含 .github/Python/DMDCBWD11CollectFile.py 及同目录依赖模块）
+        type: string
+        required: false
+        default: datatest
+
+jobs:
+  DMDCBWD11CollectFile:
+    runs-on: ubuntu-latest
+    steps:
+      # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 datatest
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || 'datatest' }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: RunDMDCBWD11CollectFile
+        env:
+          # 必填：GitHub 写仓库令牌（提交 UploadFileList 清单到 BranchMigration 用）
+          GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
+        run: python3 .github/Python/DMDCBWD11CollectFile.py
