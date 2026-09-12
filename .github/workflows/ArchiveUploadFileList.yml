@@ -20,7 +20,7 @@ name: ArchiveUploadFileList
 #       故本文件放在默认分支；运行时显式检出 Migration（队列）并取 Delete（回调记录）。
 on:
   schedule:
-    - cron: '0 21 * * *'      # 每天 UTC 21:00 = 北京时间次日 05:00（在采集 20:00 之后）
+    - cron: '0 21 * * *'      # 每天 UTC 21:00 = 北京时间次日 05:00（在采集 18:00 与上传 20:00–20:30 之后）
   workflow_dispatch:          # 手动补跑
 
 permissions:

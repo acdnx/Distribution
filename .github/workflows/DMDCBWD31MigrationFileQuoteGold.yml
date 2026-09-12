@@ -5,14 +5,16 @@ name: DMDCBWD31MigrationFileQuoteGold
 #   UpstreamUpload.py → Migration31UpstreamUpload.py → DMDCBWD31MigrationFile.py）
 #
 # 触发方式：
-#   1. 定时：每天自动触发一次（cron 0 20 * * * = 每天 20:00 UTC = 北京时间次日
-#      凌晨 04:00）。注意：schedule 只在仓库【默认分支】上已存在的工作流文件生效，
-#      请确保本文件已合入默认分支（如 main）。
+#   1. 定时：每天自动触发一次（cron 15 20 * * * = 20:15 UTC = 北京时间次日 04:15）。
+#      排期约定：11 系列（采集）先跑，31 系列（迁移）晚 2 小时；同系列三个分支共用
+#      concurrency 组 "DMDCBWD31-migration" **串行执行**（排队而非并发）；三条 cron 各错开 15 分钟。
+#      注意：schedule 只在仓库【默认分支】上已存在的工作流文件生效，
+#      请确保本文件已合入默认分支（如 dev）。
 #   2. 手动：workflow_dispatch，可在 Run workflow 面板输入/选择要执行的具体分支
 #      （默认 quote-gold；该分支需包含 DMDCBWD31MigrationFile.py 及同目录依赖模块）。
 on:
   schedule:
-    - cron: '0 20 * * *'
+    - cron: '15 20 * * *'
   workflow_dispatch:
     inputs:
       branch:
@@ -20,6 +22,14 @@ on:
         type: string
         required: false
         default: quote-gold
+
+# 串行化：与同系列另两个工作流**共用同一个组名** —— 同一时刻只跑一个，其余排队等待
+# （cancel-in-progress: false = 排队，而不是取消已在跑的那个）。
+# 注意：GitHub 对同一 concurrency 组只保留「1 个运行中 + 1 个待运行」；若前一个跑得过久、
+# 第三个又到点，待运行的那个会被新来的顶掉 —— 这里靠 15 分钟错峰规避。
+concurrency:
+  group: DMDCBWD31-migration
+  cancel-in-progress: false
 
 jobs:
   DMDCBWD31MigrationFile:
