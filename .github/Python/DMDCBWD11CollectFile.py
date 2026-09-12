@@ -12,26 +12,29 @@ DMDCBWD11CollectFile —— 编排：收集文件清单 → 写本地 txt → �
     1. 调用同目录 UpstreamFileList.collect_with_digests() 获取可上传文件清单，
        每个文件附带【内容】的 SHA1 / MD5（大写 hex）；再取该文件在 git 中的
        最后提交时间（见下）；
-    2. 将清单“一行一个”写入本地临时 txt 文件（UTF-8、LF 换行），每行为四元组：
+    2. 将清单“一行一个 JSON 对象”写入本地临时 jsonl 文件（UTF-8、LF 换行）：
 
-           {最后修改时间}|{SHA1}|{MD5}|{相对路径}
+           {"dt":"20260912124805000","sha1":"8A38…","md5":"07BE…","rel_path":"Data/Demo.json"}
 
-       - 最后修改时间：该路径在 git 中最后一次被提交的时间，格式
-         yyyyMMddHHmmssSSS、东八区（GMT+8）；稳定值——文件内容不变则同一提交
-         下该字段不变，故四元组可用于「同一文件同一版本」的唯一标识与增量去重。
-         （切勿改用文件系统 mtime：每次 clone/checkout 都会刷新，会让四元组天天变。）
-       - SHA1 / MD5：文件【内容】的哈希，大写 hex；
-       - 相对路径：放最后一位，便于解析时“从左按 | 切分、剩余整体作为路径”，
-         即使路径中含 | 也不会错位。
+       - dt：该路径在 git 中最后一次被提交的时间，格式 yyyyMMddHHmmssSSS、
+         东八区（GMT+8）；稳定值——文件内容不变则同一提交下该字段不变，故
+         (dt, sha1, md5, rel_path) 可用于「同一文件同一版本」的唯一标识与增量去重。
+         （切勿改用文件系统 mtime：每次 clone/checkout 都会刷新，会让清单天天变。）
+       - sha1 / md5：文件【内容】的哈希，大写 hex；
+       - rel_path：相对仓库根的路径，分隔符统一为正斜杠。
 
-    3. 调用同目录 GitHubCommitContent.commit_content_file 上传该 txt 到本仓库的
+       四键恒存在（取值未知写空串），键序固定；格式的权威实现在同目录
+       ManifestJsonl.py —— 该模块对未知键原样透传，故**将来新增字段只需改本脚本**，
+       中间的解析/聚合环节无需跟着改。
+
+    3. 调用同目录 GitHubCommitContent.commit_content_file 上传该 jsonl 到本仓库的
        {BranchMigration} 分支（取自 Commit.json，见下）；远端落点 path_key 固定模式：
 
-           Branch/{BranchCurrent}/UploadFileList_yyyyMMdd_HHmmssSSS_{MD5}.txt
+           Branch/{BranchCurrent}/UploadFileList_yyyyMMdd_HHmmssSSS_{MD5}.jsonl
 
        - BranchCurrent：当前 git 检出的分支名（远端路径 Branch/... 中的“当前分支”目录段）；
        - yyyyMMdd_HHmmssSSS：本地生成时间（毫秒 3 位）；
-       - MD5：清单 txt 文件内容的 MD5（UTF-8 编码、大写 hex），同内容再跑会生成相同 MD5。
+       - MD5：清单 jsonl 文件内容的 MD5（UTF-8 编码、大写 hex），同内容再跑会生成相同 MD5。
 
 配置来源（都是【仓库级 / 运行期】事实，不再往分支配置里抄副本）：
 
@@ -44,7 +47,7 @@ DMDCBWD11CollectFile —— 编排：收集文件清单 → 写本地 txt → �
     Migration.{BranchCurrent}.json —— 分支配置文件，文件名中的 {BranchCurrent} 随当前
     git 分支动态解析（见 resolve_config_path），在 quote 分支上即读 Migration.quote.json：
 
-        { "UploadFileListPath": "Branch/quote/UploadFileList.txt", ... }
+        { "UploadFileListPath": "Branch/quote/UploadFileList.jsonl", ... }
 
     该文件不再登记 BranchCurrent / BranchMigration / TargetBranch：BranchCurrent 与
     当前分支必然相同（写进文件反而可能与实际检出不一致），BranchMigration 与
@@ -58,8 +61,8 @@ GitHubCommitContentDemo 的“无默认分支”约定一致）。
     - Python 3.8+，仅标准库；
     - 真实上传依赖环境变量 GIT_COMMIT_TOKEN（由 GitHubCommitContent 读取）；
     - 同目录需存在：UpstreamFileList.py（提供 collect）、GitHubCommitContent.py
-      （提供 commit_content_file）、Commit.json（远端权威副本 + 本地回退副本）、
-      Migration.{当前分支}.json（分支配置）；
+      （提供 commit_content_file）、ManifestJsonl.py（清单格式实现）、
+      Commit.json（远端权威副本 + 本地回退副本）、Migration.{当前分支}.json（分支配置）；
     - 退出码：0 = 成功或清单为空正常跳过；1 = 任一环节失败。
 
 二、运行方式
@@ -89,6 +92,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 import GitHubCommitContent  # noqa: E402
+import ManifestJsonl        # noqa: E402
 from UpstreamFileList import collect_with_digests, _repo_root  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -113,7 +117,8 @@ JSON_KEY_UPLOAD_FILE_LIST_PATH = "UploadFileListPath"
 # 远端目录基名：Branch/{current_branch}/
 REMOTE_BASE_DIR = "Branch"
 
-# 清单文件名前缀：UploadFileList_yyyyMMdd_HHmmssSSS_{MD5}.txt
+# 清单文件名前缀：UploadFileList_yyyyMMdd_HHmmssSSS_{MD5}.jsonl
+# （内容为 JSONL；扩展名随格式而定，与 ManifestJsonl 的格式约定配套）
 FILE_NAME_PREFIX = "UploadFileList"
 
 
@@ -206,13 +211,13 @@ def load_branch_config(cfg_path=None, start_dir=None):
 
 
 def make_file_name(timestamp, digest):
-    """按 UploadFileList_yyyyMMdd_HHmmssSSS_{MD5}.txt 模式拼接清单文件名
+    """按 UploadFileList_yyyyMMdd_HHmmssSSS_{MD5}.jsonl 模式拼接清单文件名
 
     :param timestamp: 时间戳串，形如 "20260909_143000123"（由 build_timestamp 生成）
     :param digest: 清单内容的 MD5（小写 hex）
-    :return: 文件名，如 "UploadFileList_20260909_143000123_abc....txt"
+    :return: 文件名，如 "UploadFileList_20260909_143000123_abc....jsonl"
     """
-    return "%s_%s_%s.txt" % (FILE_NAME_PREFIX, timestamp, digest)
+    return "%s_%s_%s.jsonl" % (FILE_NAME_PREFIX, timestamp, digest)
 
 
 def build_timestamp(now=None):
@@ -247,6 +252,8 @@ def _fmt_gmt8(epoch):
 
 def git_last_modified_times(rel_paths, repo_root):
     """取每个路径在 git 中的“最后修改时间”（该路径最后一次被提交的时间）
+
+    结果写入清单的 dt 字段（见 compose_manifest_content）。
 
     单次遍历建好映射，不逐文件调用 git：
 
@@ -304,25 +311,24 @@ def git_last_modified_times(rel_paths, repo_root):
 
 
 def compose_manifest_content(entries):
-    """把文件清单拼成“一行一个”的文本（UTF-8，LF 换行，末行带换行）
+    """把文件清单拼成完整清单文本（JSONL，UTF-8、LF、末行带换行）
 
-    每行为四元组：{最后修改时间}|{SHA1}|{MD5}|{相对路径}
-    路径放最后一位，便于解析时“从左按 | 切分、剩余整体作为路径”。
+    每行一个 JSON 对象，键序固定 dt → sha1 → md5 → rel_path：
 
-    :param entries: dict 列表，每项需含 rel_path / sha1 / md5 / mtime 四个键
+        {"dt":"20260912124805000","sha1":"8A38…","md5":"07BE…","rel_path":"Data/Demo.json"}
+
+    格式细节（含四键恒存在、未知键透传、确定性序列化）见同目录 ManifestJsonl.py。
+
+    :param entries: dict 列表，每项需含 rel_path / sha1 / md5 / dt 四个键
                     （前三个来自 UpstreamFileList.collect_with_digests，
-                      mtime 来自 git_last_modified_times）
-    :return: 待写入 txt 的完整文本；entries 为空返回空字符串
+                      dt 来自 git_last_modified_times）
+    :return: 待写入 jsonl 的完整文本；entries 为空返回空字符串
     """
-    if not entries:
-        return ""
-    lines = ["%s|%s|%s|%s" % (e["mtime"], e["sha1"], e["md5"], e["rel_path"])
-             for e in entries]
-    return "\n".join(lines) + "\n"
+    return ManifestJsonl.compose(entries)
 
 
 def write_local_file(local_file, content):
-    """把清单文本写入本地 txt（UTF-8、LF 换行）
+    """把清单文本写入本地 jsonl（UTF-8、LF 换行）
 
     :param local_file: 本地文件绝对路径
     :param content: 待写入文本
@@ -333,10 +339,10 @@ def write_local_file(local_file, content):
 
 
 def main(cfg_path=None, out_dir=None, commit_fn=None, commit_msg=None):
-    """主流程：收集清单 → 写本地 txt → 上传到远端 BranchMigration 分支
+    """主流程：收集清单 → 写本地 jsonl → 上传到远端 BranchMigration 分支
 
     :param cfg_path: 分支配置 Migration.{当前分支}.json 的路径；None = 按当前分支解析
-    :param out_dir: 本地临时 txt 输出目录；None = 系统临时目录
+    :param out_dir: 本地临时 jsonl 输出目录；None = 系统临时目录
     :param commit_fn: 上传函数，签名同 commit_content_file(path_key, local_file,
                       branch=...)；None = GitHubCommitContent.commit_content_file
     :param commit_msg: 提交说明；None = 由 GitHubCommitContent 生成默认提交说明
@@ -387,7 +393,7 @@ def main(cfg_path=None, out_dir=None, commit_fn=None, commit_msg=None):
         print("[INFO] 无可上传文件，正常跳过（未生成清单、未上传）")
         return 0
 
-    # ---- 2b) 取每个文件的 git 最后提交时间（稳定值，四元组唯一性依赖它）----
+    # ---- 2b) 取每个文件的 git 最后提交时间（稳定值，清单条目唯一性依赖它）----
     root = _repo_root()
     if root is None:
         print("[FAIL] 未能在仓库中找到 .git 入口，无法定位仓库根目录")
@@ -399,8 +405,8 @@ def main(cfg_path=None, out_dir=None, commit_fn=None, commit_msg=None):
         print("[FAIL] %s" % e)
         return 1
     for entry in entries:
-        entry["mtime"] = mtime_map.get(entry["rel_path"], "")
-    print("[INFO] 收集到 %d 个数据文件（时间戳取 git 最后提交时间；"
+        entry["dt"] = mtime_map.get(entry["rel_path"], "")
+    print("[INFO] 收集到 %d 个数据文件（dt 取 git 最后提交时间；"
           "其中 %d 个未提交、已回退为文件 mtime）" % (len(entries), fallback))
 
     # ---- 3) 组装清单文本、MD5、文件名与远端路径 ----
@@ -415,7 +421,7 @@ def main(cfg_path=None, out_dir=None, commit_fn=None, commit_msg=None):
     path_key = "%s/%s" % (remote_dir, file_name)
     print("[INFO] 远端落点 = %s（分支 %s）" % (path_key, target_branch))
 
-    # ---- 4) 清单写入本地临时 txt ----
+    # ---- 4) 清单写入本地临时 jsonl ----
     out = out_dir or tempfile.gettempdir()
     local_file = os.path.join(out, file_name)
     try:
