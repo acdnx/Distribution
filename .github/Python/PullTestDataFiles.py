@@ -3,12 +3,19 @@
 """PullTestDataFiles —— 跨分支按原路径搬运 Data 目录下的测试数据
 
 用途
-    测试时常常需要「某分支的 Data 测试数据出现在另一个分支上」，手工下载再上传既慢又
-    容易漏文件、改路径。本脚本把【源分支】Data 目录下匹配的文件，按**原路径**复制到
-    【目标分支的相同路径】，作为测试数据直接使用。
+    测试时常常需要「某个仓库某分支的 Data 测试数据，出现在另一个仓库 / 分支上」，手工
+    下载再上传既慢又容易漏文件、改路径。本脚本把【源仓库 : 源分支】Data 目录下匹配的
+    文件，按**原路径**复制到【目标仓库 : 目标分支】的相同路径，作为测试数据直接使用。
 
-    默认搬运 *.json 与 *.mvsv 两种后缀（按文件名匹配，不限目录深度）；要搬运其它
-    后缀用 --pattern 覆盖，多个模式用英文逗号分隔。
+    源与目标**可以是不同的仓库**：目标仓库身份取自本仓的 Commit.json（登记的是本仓
+    自己），源仓库身份由 --source-owner / --source-repo 指定；两者相同时即退化为
+    「同一仓库内跨分支搬运」。源仓库按只读访问，令牌对它无需写权限。
+
+    由于 git 的 blob sha 只由内容决定，跨仓库比对依然成立：源仓库某文件的 blob sha 与
+    目标仓库同路径文件的 blob sha 相同，即说明两边内容逐字节一致，可直接跳过。
+
+    默认搬运 *.json、*.mvsv 与 *.log 三种后缀（按文件名匹配，不限目录深度）；要搬运
+    其它后缀用 --pattern 覆盖，多个模式用英文逗号分隔。
 
 为什么不 clone
     仓库体积大，即便 --depth 1 也会拉下完整目录树；而测试数据通常只有十几个文件，
@@ -55,12 +62,19 @@
     - 文件清单被 GitHub 截断（truncated=true）时失败退出，绝不按残缺清单做同步。
 
 用法
-    python3 .github/Python/PullTestDataFiles.py --source datatest --target quote
-    python3 .github/Python/PullTestDataFiles.py --source datatest --target quote --dry-run
-    python3 .github/Python/PullTestDataFiles.py --source datatest --target quote --pattern '*.json'
+    # 跨仓库：从 ACANX/Distribution 的 quote 分支，拉到本仓的 datatest 分支
+    python3 .github/Python/PullTestDataFiles.py \
+        --source-owner ACANX --source-repo Distribution --source-branch quote \
+        --target-branch datatest --dry-run
+
+    # 同仓库跨分支：省略 --source-owner / --source-repo 时，默认与目标仓库相同
+    python3 .github/Python/PullTestDataFiles.py \
+        --source-branch datatest --target-branch quote
 
 环境变量
-    GIT_COMMIT_TOKEN —— 需目标仓库写权限；缺失即失败退出（不静默降级为只读）。
+    GIT_COMMIT_TOKEN —— 需**目标仓库**写权限；缺失即失败退出（不静默降级为只读）。
+                        源仓库按只读访问，令牌对它无写权限要求（源为公开仓库时，
+                        即使令牌未覆盖它也能读）。
 
 退出码
     0 = 成功（含「无可同步文件」这类正常结束）；1 = 存在失败项或参数/环境不满足。
@@ -93,7 +107,7 @@ DEFAULT_PATH_PREFIX = "Data"
 
 #: 默认匹配哪些文件（按**文件名**匹配，不含目录段，故任意深度都覆盖）
 #: 多个模式用英文逗号分隔
-DEFAULT_PATTERN = "*.json,*.mvsv"
+DEFAULT_PATTERN = "*.json,*.mvsv,*.log"
 
 #: 单次 HTTP 请求超时秒数
 DEFAULT_TIMEOUT = 30
@@ -534,10 +548,14 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="PullTestDataFiles.py",
         description="把源分支 Data 目录下的测试数据按原路径同步到目标分支（走 API，不 clone）")
-    parser.add_argument("--source", required=True,
-                        help="源分支（从它的 Data 目录拉取），如 datatest")
-    parser.add_argument("--target", required=True,
-                        help="目标分支（写到它的相同路径），如 quote")
+    parser.add_argument("--source-branch", required=True,
+                        help="源分支（从它的 Data 目录拉取），如 quote")
+    parser.add_argument("--target-branch", required=True,
+                        help="目标分支（写到它的相同路径），如 datatest")
+    parser.add_argument("--source-owner", default="",
+                        help="源仓库属主；留空 = 与目标仓库相同（即同仓库跨分支）")
+    parser.add_argument("--source-repo", default="",
+                        help="源仓库名；留空 = 与目标仓库相同（即同仓库跨分支）")
     parser.add_argument("--path-prefix", default=DEFAULT_PATH_PREFIX,
                         help="源目录前缀，默认 %s" % DEFAULT_PATH_PREFIX)
     parser.add_argument("--pattern", default=DEFAULT_PATTERN,
@@ -551,21 +569,26 @@ def build_parser():
     return parser
 
 
-def _collect_contents(api_base, owner, repo, to_copy, token, timeout):
-    """逐个下载待同步文件并建 blob，边下边以 sha 自证
+def _collect_contents(api_base, src_owner, src_repo, tgt_owner, tgt_repo,
+                      to_copy, token, timeout):
+    """从源仓库逐个下载待同步文件，并在目标仓库建 blob，边下边以 sha 自证
+
+    下载走源仓库、建 blob 走目标仓库 —— 跨仓库时这是两个不同的仓库。构建出的 blob sha
+    与源文件的 blob sha 相同，即证明目标仓库收到的字节与源逐字节一致。
 
     :return: (blobs, err) —— blobs 为 [{"path","sha","blob_sha"}]；任一文件出错即返回 err
     """
     blobs = []
     for item in to_copy:
         path = item["path"]
-        content, err = fetch_blob(api_base, owner, repo, item["sha"], token, timeout)
+        content, err = fetch_blob(api_base, src_owner, src_repo, item["sha"],
+                                  token, timeout)
         if err:
-            return None, "%s：下载失败 —— %s" % (path, err)
+            return None, "%s：从 %s/%s 下载失败 —— %s" % (path, src_owner, src_repo, err)
 
-        blob_sha, err = create_blob(api_base, owner, repo, content, token, timeout)
+        blob_sha, err = create_blob(api_base, tgt_owner, tgt_repo, content, token, timeout)
         if err:
-            return None, "%s：创建 blob 失败 —— %s" % (path, err)
+            return None, "%s：在 %s/%s 创建 blob 失败 —— %s" % (path, tgt_owner, tgt_repo, err)
         if blob_sha != item["sha"]:
             # 服务端算出的 sha 与源不符 = 内容被改动过（如 clean 过滤），
             # 此刻尚未建提交，整批中止即可，目标分支仍是原样
@@ -583,17 +606,13 @@ def main(argv=None):
     :return: 进程退出码（0 成功 / 1 失败）
     """
     args = build_parser().parse_args(argv)
-    source = (args.source or "").strip()
-    target = (args.target or "").strip()
+    src_branch = (args.source_branch or "").strip()
+    tgt_branch = (args.target_branch or "").strip()
     prefix = (args.path_prefix or "").strip().strip("/")
 
     # ---- 1) 参数与环境 ----
-    if not source or not target:
+    if not src_branch or not tgt_branch:
         _log("[FAIL] 源分支与目标分支都不得为空")
-        return 1
-    if source == target:
-        _log("[FAIL] 源分支与目标分支相同（%s）—— 无内容可同步，"
-             "疑似参数填错；已中止以免误判为同步成功" % source)
         return 1
     if not prefix:
         _log("[FAIL] 目录前缀不得为空")
@@ -609,28 +628,44 @@ def main(argv=None):
         _log("[FAIL] 请设置环境变量 %s（需目标仓库写权限）" % ENV_TOKEN)
         return 1
 
+    # 目标仓库身份取自本仓 Commit.json（登记的是本仓自己）；
+    # 源仓库未指定时默认与目标相同，即退化为「同一仓库内跨分支搬运」
     cfg = GitHubCommitContent.load_commit_config() or {}
-    owner = (cfg.get("owner") or "").strip()
-    repo = (cfg.get("repo") or "").strip()
-    if not (owner and repo):
+    tgt_owner = (cfg.get("owner") or "").strip()
+    tgt_repo = (cfg.get("repo") or "").strip()
+    if not (tgt_owner and tgt_repo):
         _log("[FAIL] 未能从 Commit.json 解析出 owner/repo，无法定位目标仓库")
         return 1
+    src_owner = (args.source_owner or "").strip() or tgt_owner
+    src_repo = (args.source_repo or "").strip() or tgt_repo
 
-    _log("[INFO] 仓库 = %s/%s | 源分支 = %s | 目标分支 = %s | 目录 = %s/ | 匹配 = %s"
-         % (owner, repo, source, target, prefix, pattern_label))
-    _log("[INFO] 模式 = %s" % ("dry-run（只列计划、不写入）" if args.dry_run else "实际同步"))
+    if (src_owner, src_repo, src_branch) == (tgt_owner, tgt_repo, tgt_branch):
+        _log("[FAIL] 源与目标是同一仓库的同一分支（%s/%s:%s）—— 无内容可同步，"
+             "疑似参数填错；已中止以免误判为同步成功"
+             % (src_owner, src_repo, src_branch))
+        return 1
+
+    _log("[INFO] 源   = %s/%s : %s" % (src_owner, src_repo, src_branch))
+    _log("[INFO] 目标 = %s/%s : %s" % (tgt_owner, tgt_repo, tgt_branch))
+    _log("[INFO] 目录 = %s/ | 匹配 = %s | 模式 = %s"
+         % (prefix, pattern_label,
+            "dry-run（只列计划、不写入）" if args.dry_run else "实际同步"))
 
     # ---- 2) 两侧清单 ----
-    source_tree, err = fetch_tree(args.api_base, owner, repo, source, token, args.timeout)
+    source_tree, err = fetch_tree(args.api_base, src_owner, src_repo, src_branch,
+                                  token, args.timeout)
     if err:
-        _log("[FAIL] 读取源分支（%s）文件清单失败：%s" % (source, err))
+        _log("[FAIL] 读取源（%s/%s:%s）文件清单失败：%s"
+             % (src_owner, src_repo, src_branch, err))
         return 1
-    target_tree, err = fetch_tree(args.api_base, owner, repo, target, token, args.timeout)
+    target_tree, err = fetch_tree(args.api_base, tgt_owner, tgt_repo, tgt_branch,
+                                  token, args.timeout)
     if err:
-        _log("[FAIL] 读取目标分支（%s）文件清单失败：%s" % (target, err))
+        _log("[FAIL] 读取目标（%s/%s:%s）文件清单失败：%s"
+             % (tgt_owner, tgt_repo, tgt_branch, err))
         return 1
-    _log("[INFO] 文件清单：%s 共 %d 个文件，%s 共 %d 个文件"
-         % (source, len(source_tree), target, len(target_tree)))
+    _log("[INFO] 文件清单：源 %s 个文件，目标 %s 个文件"
+         % (len(source_tree), len(target_tree)))
 
     # ---- 3) 挑选与比对 ----
     matched, ignored = select_source_files(source_tree, prefix, patterns)
@@ -654,7 +689,7 @@ def main(argv=None):
         _log("[PASS] dry-run：同步计划如上，未写入任何文件")
         return 0
     if not to_copy:
-        _log("[PASS] 目标分支已与源一致，无需提交（未做任何改动）")
+        _log("[PASS] 目标已与源一致，无需提交（未做任何改动）")
         return 0
 
     # ---- 4) 超限文件先把关：整批不落地，故任一超限即中止 ----
@@ -668,44 +703,49 @@ def main(argv=None):
              % len(oversize))
         return 1
 
-    # ---- 5) 下载 + 建 blob（内容在此逐字节自证）----
-    _log("[INFO] 下载并创建 blob：%d 个文件" % len(to_copy))
-    blobs, err = _collect_contents(args.api_base, owner, repo, to_copy, token, args.timeout)
+    # ---- 5) 从源仓库下载 + 在目标仓库建 blob（内容在此逐字节自证）----
+    _log("[INFO] 从 %s/%s 下载并在 %s/%s 创建 blob：%d 个文件"
+         % (src_owner, src_repo, tgt_owner, tgt_repo, len(to_copy)))
+    blobs, err = _collect_contents(args.api_base, src_owner, src_repo,
+                                   tgt_owner, tgt_repo, to_copy, token, args.timeout)
     if err:
         _log("[FAIL] %s" % err)
         _log("[FAIL] 已在建提交之前中止：目标分支未改动（blob 为游离对象，不会被引用）")
         return 1
 
     # ---- 6) 打包成一次提交 ----
-    head, err = fetch_branch_head(args.api_base, owner, repo, target, token, args.timeout)
+    head, err = fetch_branch_head(args.api_base, tgt_owner, tgt_repo, tgt_branch,
+                                  token, args.timeout)
     if err:
         _log("[FAIL] 读取目标分支 head 失败：%s" % err)
         return 1
 
-    tree_sha, err = create_tree(args.api_base, owner, repo, head["tree_sha"],
+    tree_sha, err = create_tree(args.api_base, tgt_owner, tgt_repo, head["tree_sha"],
                                 blobs, token, args.timeout)
     if err:
         _log("[FAIL] 创建树失败：%s" % err)
         return 1
 
-    commit_msg = "chore(testdata): 从 %s 同步测试数据到 %s（%d 个文件）" % (
-        source, target, len(blobs))
-    commit_sha, err = create_commit(args.api_base, owner, repo, commit_msg,
+    commit_msg = "chore(testdata): 从 %s/%s:%s 同步测试数据到 %s（%d 个文件）" % (
+        src_owner, src_repo, src_branch, tgt_branch, len(blobs))
+    commit_sha, err = create_commit(args.api_base, tgt_owner, tgt_repo, commit_msg,
                                     tree_sha, head["commit_sha"], token, args.timeout)
     if err:
         _log("[FAIL] 创建提交失败：%s" % err)
         return 1
 
-    _, err = update_ref(args.api_base, owner, repo, target, commit_sha, token, args.timeout)
+    _, err = update_ref(args.api_base, tgt_owner, tgt_repo, tgt_branch, commit_sha,
+                        token, args.timeout)
     if err:
-        _log("[FAIL] 移动 %s 分支指针失败：%s" % (target, err))
+        _log("[FAIL] 移动 %s 分支指针失败：%s" % (tgt_branch, err))
         _log("[FAIL] 目标分支保持原样（提交对象已生成但未被引用）")
         return 1
-    _log("[PASS] 已提交到 %s：https://github.com/%s/%s/commit/%s"
-         % (target, owner, repo, commit_sha))
+    _log("[PASS] 已提交到 %s/%s:%s：https://github.com/%s/%s/commit/%s"
+         % (tgt_owner, tgt_repo, tgt_branch, tgt_owner, tgt_repo, commit_sha))
 
     # ---- 7) 复核：重新取目标分支清单，逐路径比对 sha ----
-    verify_tree, err = fetch_tree(args.api_base, owner, repo, target, token, args.timeout)
+    verify_tree, err = fetch_tree(args.api_base, tgt_owner, tgt_repo, tgt_branch,
+                                  token, args.timeout)
     if err:
         _log("[WARN] 提交已成功，但复核时读取目标分支清单失败：%s" % err)
         return 0
