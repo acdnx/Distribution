@@ -1,7 +1,0 @@
-{
-  "name": "demo-b",
-  "route": "Data/Demo/",
-  "expectCid": "4501806882199176893",
-  "purpose": "CID 路由样本（小对象）",
-  "validJson": true
-}
