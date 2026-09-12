@@ -204,6 +204,7 @@ import datetime
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -221,16 +222,28 @@ DEFAULT_API_BASE = "https://api.github.com/repos"
 # 分支默认值（迁移文件驻留 / 上传目标远端分支）
 DEFAULT_BRANCH = "Migration"
 
-# Commit.json 配置文件与登记字段（与本脚本同目录，登记目标仓库身份 / 分支默认值）
+# Commit.json 配置文件与登记字段（登记目标仓库身份 / 分支默认值）
 #   Owner：目标仓库属主；Repo：目标仓库名；
 #   BranchMigration：迁移文件（上传清单 / 成功清单）驻留分支（commit 默认分支，
 #                    默认 "Migration"；原命名 BranchUpstream 已废弃）；
+#   BranchSuccess：成功清单（UploadSuccessList）专用回传分支，未登记时由调用方自行回退；
 #   BranchDelete：存放“已上传待删除文件清单”的分支（删除类 API 使用）。
+#
+# 权威副本只有一份 —— COMMIT_CONFIG_BRANCH 上的 COMMIT_CONFIG_PATH，运行时经
+# Contents API 取回（见 load_commit_config）。各分支不再各自维护一份重复配置：
+# 该文件登记的是【仓库级】身份（Owner/Repo）与各流程共用的回传分支，本就与分支无关。
 COMMIT_CONFIG_FILE = "Commit.json"
+COMMIT_CONFIG_PATH = ".github/Python/" + COMMIT_CONFIG_FILE
+COMMIT_CONFIG_BRANCH = "dev"
+
 CFG_KEY_OWNER = "Owner"
 CFG_KEY_REPO = "Repo"
 CFG_KEY_BRANCH_MIGRATION = "BranchMigration"
+CFG_KEY_BRANCH_SUCCESS = "BranchSuccess"
 CFG_KEY_BRANCH_DELETE = "BranchDelete"
+
+# 远端起 Commit.json 的尝试次数（网络抖动 / 5xx 时退避重试，用尽才回退本地副本）
+COMMIT_CONFIG_RETRY = 3
 
 # 提交人（固定使用通用 bot 身份，避免以个人账号产生提交）
 BOT_NAME = "github-bot"
@@ -292,15 +305,40 @@ def _read_gitdir_file(git_file, base_dir):
     return os.path.normpath(os.path.join(base_dir, value))
 
 
-def _read_remote_url(git_dir):
-    """读取 <git_dir>/config 中 origin（缺省取第一个）remote 的 url
+def _common_git_dir(git_dir):
+    """返回共享 git 元数据目录（链接工作树经 commondir 指回主仓库的 .git）
 
-    :param git_dir: git 元数据目录
+    链接工作树（git worktree add 出来的检出）的 gitdir 下**没有 config** —— 它由
+    <git_dir>/commondir 记录主仓库 git 目录的相对路径（通常为 "../.."），配置、remote
+    等都在那边。非工作树形态不存在该文件，原样返回。
+
+    :param git_dir: git 元数据目录（_find_git_dir 的结果）
+    :return: 含 config 的 git 元数据目录绝对路径；无法解析时返回原 git_dir
+    """
+    commondir_file = os.path.join(git_dir, "commondir")
+    if not os.path.isfile(commondir_file):
+        return git_dir
+    try:
+        with open(commondir_file, "r", encoding="utf-8", errors="replace") as f:
+            rel = f.readline().strip()
+    except OSError:
+        return git_dir
+    if not rel:
+        return git_dir
+    resolved = os.path.normpath(os.path.join(git_dir, rel))
+    return resolved if os.path.isdir(resolved) else git_dir
+
+
+def _read_remote_url(git_dir):
+    """读取 git 配置中 origin（缺省取第一个）remote 的 url
+
+    :param git_dir: git 元数据目录（链接工作树会经 _common_git_dir 定位到主仓库）
     :return: remote url 字符串；无 remote / 读取失败返回 None
     """
     cfg = configparser.ConfigParser(strict=False, interpolation=None)
+    path = os.path.join(_common_git_dir(git_dir), "config")
     try:
-        read_ok = cfg.read(os.path.join(git_dir, "config"), encoding="utf-8")
+        read_ok = cfg.read(path, encoding="utf-8")
     except (configparser.Error, OSError):
         return None
     if not read_ok:
@@ -375,48 +413,125 @@ def load_owner_repo_from_git_config(start_dir=None):
     return _parse_github_owner_repo(url)
 
 
-def load_commit_config(cfg_path=None):
-    """读取同目录 Commit.json 登记的目标仓库默认值
+def _commit_config_grab(data, key):
+    """取出键值并转非空字符串；缺失或为空返回空串"""
+    value = data.get(key)
+    if value is None:
+        return ""
+    return str(value).strip()
 
-    Commit.json 与本脚本同目录，登记字段（PascalCase）：
+
+def _normalize_commit_config(data):
+    """把 Commit.json 的 PascalCase 字段归一为统一小写键的 dict
+
+    :param data: 已解析的 JSON 对象
+    :return: dict（含 owner / repo / branch_migration / branch_success /
+             branch_delete，缺失字段为空串）
+    """
+    return {
+        "owner": _commit_config_grab(data, CFG_KEY_OWNER),
+        "repo": _commit_config_grab(data, CFG_KEY_REPO),
+        "branch_migration": _commit_config_grab(data, CFG_KEY_BRANCH_MIGRATION),
+        "branch_success": _commit_config_grab(data, CFG_KEY_BRANCH_SUCCESS),
+        "branch_delete": _commit_config_grab(data, CFG_KEY_BRANCH_DELETE),
+    }
+
+
+def _load_commit_config_local(cfg_path):
+    """读取本地 Commit.json 并解析为 JSON 对象
+
+    :param cfg_path: 本地文件路径
+    :return: dict；文件缺失 / 非法 / 顶层非对象时返回 None（仅 stderr 告警，不抛异常）
+    """
+    if not os.path.isfile(cfg_path):
+        return None
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        _warn("读取 %s 失败: %s" % (cfg_path, e))
+        return None
+    if not isinstance(data, dict):
+        _warn("%s 顶层应为 JSON 对象" % cfg_path)
+        return None
+    return data
+
+
+# load_commit_config 的进程内缓存：一次运行里被多个调用点重复取配置时只解析一次
+_commit_config_cache = None     # dict：已解析的 JSON 对象；None = 尚未解析成功
+_commit_config_failed = False   # True：两种来源都不可用，后续调用直接返回 None
+
+
+def load_commit_config(cfg_path=None, token=None, use_remote=None):
+    """读取 Commit.json 登记的目标仓库默认值（远端权威副本优先，取不到才回退本地）
+
+    登记字段（PascalCase）：
         Owner / Repo：提交 / 删除 / 遍历的目标仓库身份；
         BranchMigration：迁移文件（上传清单 / 成功清单）驻留分支（commit 默认分支，
                          默认 "Migration"）；
+        BranchSuccess：成功清单（UploadSuccessList）专用回传分支；
         BranchDelete：存放“已上传待删除文件清单”的分支（删除类 API 使用）。
 
-    返回 dict 统一小写键；Commit.json 缺失时静默返回 None（正常回退到 .git 解析 /
-    内置默认值），缺失或非法时仅 stderr 告警后返回 None，不抛异常。
+    来源优先级：
+        1. cfg_path 显式传入 → 直接读该本地文件（测试注入 / 特殊部署用，行为与改造前一致）；
+        2. 默认 → 经 Contents API 从 COMMIT_CONFIG_BRANCH（dev）取 COMMIT_CONFIG_PATH ——
+           **权威副本只有这一份**，各分支不再各自维护重复配置；
+        3. 远端取不到（无令牌 / 网络失败 / 分支或文件不存在）→ 回退本脚本同目录的本地
+           副本并告警，避免网络不可达时整条链路中断。
 
-    :param cfg_path: Commit.json 路径；None = 与本脚本同目录的 Commit.json
-    :return: dict（含 owner / repo / branch_migration / branch_delete，缺失字段为空串）；
-             文件缺失 / 非法 / 顶层非对象时返回 None
+    缓存两层：
+        - 进程内 —— 同一次运行里被多个调用点重复取配置时只解析一次，**不会重复发 HTTP**；
+        - 落盘 —— 首次从远端取回后把原文回写为本地同目录副本，本地副本自此是权威
+          副本的**缓存**（而非需各分支人工维护的重复配置），并在远端不可达时充当兜底。
+
+    实际来源只打印一次（走 stderr 诊断，与 _warn 同一出口），便于从运行日志确认
+    这一轮吃的是哪份配置。
+
+    :param cfg_path: 本地 Commit.json 路径；None = 远端权威副本优先
+    :param token: 访问令牌；None = 环境变量 GIT_COMMIT_TOKEN
+    :param use_remote: False = 强制只读本地副本（不请求远端）
+    :return: dict（含 owner / repo / branch_migration / branch_success /
+             branch_delete，缺失字段为空串）；两种来源都拿不到时返回 None
     """
-    path = cfg_path or os.path.join(_script_dir(), COMMIT_CONFIG_FILE)
-    if not os.path.isfile(path):
-        return None  # 未登记：静默回退（本模块被拷到无配置目录时同样可用）
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError) as e:
-        _warn("读取 Commit.json 失败（回退 .git 解析/内置默认）: %s" % e)
-        return None
-    if not isinstance(data, dict):
-        _warn("Commit.json 顶层应为 JSON 对象（回退 .git 解析/内置默认）")
+    global _commit_config_cache, _commit_config_failed
+
+    # 显式指定路径：只读本地，不走远端缓存（调用方要的就是这一份）
+    if cfg_path:
+        data = _load_commit_config_local(cfg_path)
+        if data is None:
+            _warn("读取 Commit.json 失败（回退 .git 解析/内置默认）")
+            return None
+        return _normalize_commit_config(data)
+
+    if _commit_config_cache is not None:
+        return _normalize_commit_config(_commit_config_cache)
+    if _commit_config_failed:
         return None
 
-    def grab(key):
-        """取出键值并转非空字符串；缺失或为空返回空串"""
-        value = data.get(key)
-        if value is None:
-            return ""
-        return str(value).strip()
+    # ---- 1) 远端权威副本（每次运行只请求一次，取回后即回写本地缓存）----
+    if use_remote is None or use_remote:
+        data, raw, err = _fetch_commit_config(token=token)
+        if data is not None:
+            _commit_config_cache = data
+            written = _cache_commit_config_local(
+                raw, os.path.join(_script_dir(), COMMIT_CONFIG_FILE))
+            _warn("Commit.json 来源 = 远端分支 %s（%s/%s%s）"
+                  % (COMMIT_CONFIG_BRANCH, COMMIT_CONFIG_BRANCH, COMMIT_CONFIG_PATH,
+                     "，已回写本地缓存" if written else "，本地缓存已是同一份"))
+            return _normalize_commit_config(data)
+        _warn("从分支 %s 取 %s 失败: %s → 回退本地副本"
+              % (COMMIT_CONFIG_BRANCH, COMMIT_CONFIG_PATH, err))
 
-    return {
-        "owner": grab(CFG_KEY_OWNER),
-        "repo": grab(CFG_KEY_REPO),
-        "branch_migration": grab(CFG_KEY_BRANCH_MIGRATION),
-        "branch_delete": grab(CFG_KEY_BRANCH_DELETE),
-    }
+    # ---- 2) 本地副本回退 ----
+    local_path = os.path.join(_script_dir(), COMMIT_CONFIG_FILE)
+    data = _load_commit_config_local(local_path)
+    if data is None:
+        _warn("本地副本 %s 不可用（回退 .git 解析/内置默认）" % local_path)
+        _commit_config_failed = True
+        return None
+    _commit_config_cache = data
+    _warn("Commit.json 来源 = 本地副本 %s（远端不可用，已回退）" % local_path)
+    return _normalize_commit_config(data)
 
 
 def _resolve_target(owner, repo, branch):
@@ -523,6 +638,102 @@ def _parse_json(text):
         return json.loads(text)
     except ValueError:
         return None
+
+
+def _fetch_commit_config(token=None, owner=None, repo=None, branch=None,
+                         api_base=DEFAULT_API_BASE, timeout=30,
+                         retry=COMMIT_CONFIG_RETRY):
+    """经 Contents API 从权威分支取回 Commit.json
+
+    owner/repo 取自本脚本所在仓库的 .git/config —— **不能用 Commit.json 自举**
+    （取它之前就得先知道去哪个仓库取）。分支名同理来自 COMMIT_CONFIG_BRANCH 常量。
+
+    :param token: 访问令牌；None = 环境变量 GIT_COMMIT_TOKEN
+    :param owner: 仓库属主；None = 从本仓库 .git/config 解析
+    :param repo: 仓库名；None = 从本仓库 .git/config 解析
+    :param branch: 配置文件所在分支；None = COMMIT_CONFIG_BRANCH
+    :param api_base: GitHub API 仓库根（含 /repos）
+    :param timeout: 单次请求超时秒数
+    :param retry: 尝试次数（含首次）；每次失败后退避 1s、2s …
+    :return: (data, raw, err)：
+        - 成功：data 为解析出的 JSON 对象、raw 为远端原文（供调用方落盘缓存）、err 为 None；
+        - 失败：data / raw 为 None、err 为失败原因（供调用方在回退时告警）
+    """
+    tok = (token if token is not None else (os.environ.get(ENV_TOKEN) or "")).strip()
+    if not tok:
+        return None, None, "未提供令牌（环境变量 %s 为空）" % ENV_TOKEN
+    if not owner or not repo:
+        owner, repo = load_owner_repo_from_git_config()
+    if not owner or not repo:
+        return None, None, "无法从本仓库 .git/config 解析出 github.com 的 owner/repo"
+
+    ref = (branch or COMMIT_CONFIG_BRANCH).strip()
+    url = "%s/%s/%s/contents/%s?ref=%s" % (
+        api_base, owner, repo,
+        urllib.parse.quote(COMMIT_CONFIG_PATH, safe="/"),
+        urllib.parse.quote(ref, safe=""))
+
+    attempts = max(1, retry)
+    last_err = "未知原因"
+    for attempt in range(1, attempts + 1):
+        status, text, err = _request("GET", url, _auth_headers(tok), None, timeout)
+        if err:
+            last_err = err
+        elif status == 404:
+            return None, None, "仓库 %s/%s 的分支 %s 上不存在 %s（HTTP 404）" % (
+                owner, repo, ref, COMMIT_CONFIG_PATH)
+        elif status == 200:
+            body = _parse_json(text)
+            content = body.get("content") if isinstance(body, dict) else None
+            if not content:
+                # 超过 1MB 时 Contents API 返回空 content（应对之法是改用 git blob API）；
+                # Commit.json 只有几百字节，正常到不了这里 —— 显式报错而非当作空配置
+                last_err = "响应缺少 content 字段（文件过大被截断？）"
+            else:
+                try:
+                    raw = base64.b64decode(content).decode("utf-8", errors="replace")
+                except (ValueError, TypeError) as e:
+                    last_err = "content 不是合法 base64: %s" % e
+                else:
+                    data = _parse_json(raw)
+                    if isinstance(data, dict):
+                        return data, raw, None
+                    last_err = "内容不是合法 JSON 对象"
+        else:
+            last_err = "HTTP %s" % status
+        if attempt < attempts:
+            time.sleep(attempt)
+    return None, None, "%s（已尝试 %d 次）" % (last_err, attempts)
+
+
+def _cache_commit_config_local(raw, path):
+    """把远端取回的 Commit.json 原文落盘为本地缓存
+
+    本地副本自此不再是“需要各分支各自维护的配置”，而是权威副本（dev）的缓存：
+    每次运行首次取回即回写，内容有变化才写。这样各分支无需人工同步，偶发的内容
+    漂移（例如某分支漏了后来新增的字段）也会在下一次运行时自动纠正。
+
+    先写同目录临时文件再 os.replace 原子替换，避免进程中断留下半截文件；
+    写失败（只读文件系统 / 无权限）只告警，不影响本次运行 —— 远端已取到，
+    配置本就在手，落盘只是为下一次/离线兜底。
+
+    :param raw: 远端原文（UTF-8 字符串）
+    :param path: 本地缓存文件路径
+    :return: bool —— True = 已回写（内容有更新）；False = 未写（内容相同或写入失败）
+    """
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                if f.read() == raw:
+                    return False
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(raw)
+        os.replace(tmp_path, path)
+        return True
+    except OSError as e:
+        _warn("回写本地缓存 %s 失败（本次运行不受影响）: %s" % (path, e))
+        return False
 
 
 # 控制台 UTF-8 重配置只执行一次的标志
