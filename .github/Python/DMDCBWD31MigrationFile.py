@@ -309,9 +309,14 @@ def _now_tag():
 def _log(message):
     """带 yyMMdd.HHmmss.SSS 时间前缀的日志输出（走 stdout）
 
+    flush=True 不可省：CI 里 stdout 是管道、非 TTY，Python 默认块缓冲，日志会攒到
+    进程结束才一次性写出，导致 GitHub 侧的接收时间戳全部挤在同一秒、与实际产出时刻
+    相差几十秒（本文件此前就出现过整段日志挤在 05:00:41 的现象）。逐行 flush 后，
+    日志行的接收时间与行内 [yyMMdd.HHmmss.SSS] 前缀才能对上。
+
     :param message: 日志内容（可含 [INFO]/[PASS]/[FAIL] 等分级前缀）
     """
-    print("[%s] %s" % (_now_tag(), message))
+    print("[%s] %s" % (_now_tag(), message), flush=True)
 
 
 def parse_manifest_lines(text):
