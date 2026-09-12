@@ -1,0 +1,15 @@
+{
+  "ts": 1789181810,
+  "dt": "2026-09-12 10:56:50 UTC",
+  "state_backend": "dynamodb",
+  "cache_hit": true,
+  "backend_read_attempted": false,
+  "backend_read_success": false,
+  "local_write_success": true,
+  "backend_write_success": true,
+  "selected_code": "600570",
+  "reason": "score",
+  "reason_detail": "收益最大 - 距上次新数据23.0小时, 基础权重高(x21)",
+  "poll_success": true,
+  "errors": []
+}

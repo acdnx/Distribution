@@ -1,0 +1,15 @@
+{
+  "ts": 1789163211,
+  "dt": "2026-09-12 05:46:51 UTC",
+  "state_backend": "dynamodb",
+  "cache_hit": true,
+  "backend_read_attempted": false,
+  "backend_read_success": false,
+  "local_write_success": true,
+  "backend_write_success": true,
+  "selected_code": "GCMain",
+  "reason": "score",
+  "reason_detail": "收益最大 - 基础权重高(x94)",
+  "poll_success": true,
+  "errors": []
+}

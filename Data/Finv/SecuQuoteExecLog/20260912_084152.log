@@ -1,0 +1,15 @@
+{
+  "ts": 1789173712,
+  "dt": "2026-09-12 08:41:52 UTC",
+  "state_backend": "dynamodb",
+  "cache_hit": true,
+  "backend_read_attempted": false,
+  "backend_read_success": false,
+  "local_write_success": true,
+  "backend_write_success": true,
+  "selected_code": "PAXG",
+  "reason": "score",
+  "reason_detail": "收益最大 - 市场时段活跃(权重8.0), 基础权重高(x62)",
+  "poll_success": true,
+  "errors": []
+}
