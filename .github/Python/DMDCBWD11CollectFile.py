@@ -372,6 +372,9 @@ def main(cfg_path=None, out_dir=None, commit_fn=None, commit_msg=None):
     # 事实，登记在本分支配置里纯属重复；权威副本在 dev 分支，运行时取回
     commit_cfg = GitHubCommitContent.load_commit_config()
     target_branch = (commit_cfg or {}).get("branch_migration") or ""
+    # owner / repo 仅供日志末尾拼可点链接用（上传本身的身份解析由 commit_content_file 自己做）
+    owner = (commit_cfg or {}).get("owner") or ""
+    repo = (commit_cfg or {}).get("repo") or ""
     if not target_branch:
         print("[FAIL] Commit.json 缺少字段 BranchMigration（不得为空，避免误传）")
         return 1
@@ -444,7 +447,11 @@ def main(cfg_path=None, out_dir=None, commit_fn=None, commit_msg=None):
 
     if isinstance(result, dict) and result.get("success"):
         status = result.get("http_status")
-        print("[PASS] 上传成功，http_status=%s（201=新建 / 200=更新）" % status)
+        # 末尾附可点链接，便于从运行日志直接跳到上传结果；
+        # 身份取不到时不打半截链接（宁可没有，也不给一个点不开的 URL）
+        link = ("  https://github.com/%s/%s/blob/%s/%s"
+                % (owner, repo, target_branch, path_key)) if (owner and repo) else ""
+        print("[PASS] 上传成功，http_status=%s（201=新建 / 200=更新）%s" % (status, link))
         return 0
     if isinstance(result, dict):
         message = result.get("message")
