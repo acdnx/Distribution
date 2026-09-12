@@ -9,9 +9,9 @@ DMDCBWD31MigrationFile —— 下载上传清单 → 逐文件 OBS 上传 → �
 承接 DMDCBWD11CollectFile（把仓库数据文件清单上传到远端）之后的“真正把文件上传到 OBS”环节：
 
     1. 从 Commit.json 登记的目标仓库（Owner/Repo）的 BranchMigration 分支，下载
-       分支配置 Migration.{当前分支}.json 中 UploadFileListPath 指定的清单 txt
+       分支配置 Migration.{当前分支}.json 中 UploadFileListPath 指定的清单 jsonl
        （GitHub Contents GET）；
-    2. 把清单按行读取，每行是该文件相对【仓库根目录】的相对路径；
+    2. 把清单按行读取（每行一个 JSON 对象，见 ManifestJsonl），取出 rel_path；
     3. 逐行到本地仓库工作树取对应文件：
        - 文件不存在：打印日志 + 进程内汇总（不报错、跳过，不终止）；
        - 文件存在：调用 OBSClient.upload_file 上传（携带 rel_path / key / owner /
@@ -28,11 +28,12 @@ DMDCBWD31MigrationFile —— 下载上传清单 → 逐文件 OBS 上传 → �
          （设置了回调端点，PUT 才携带 x-obs-callback 头），由 OBS 在对象落盘成功后
          【服务端原生回调】该端点（回调体含仓库上下文 + OBS 系统变量，
          见 OBSClient 模块说明）；
-    4. 汇总上传成功的文件，一行一个写入本地临时 txt（与上传清单同一口径：
-       四元组条目原样回写 {最后修改时间}|{SHA1}|{MD5}|{相对路径}，历史格式条目
-       仍只写相对路径——详见 compose_success_content）；
+    4. 汇总上传成功的文件，一行一个写入本地临时 jsonl（与上传清单同一格式口径：
+       仍按 ManifestJsonl 的四个键回写——清单行里带内容标识的照原值回写，
+       三者皆空的（历史纯路径行）也写成四键齐全、取值空串的 JSON 对象——
+       详见 compose_success_content）；
     5. 调用 GitHubCommitContent.commit_content_file 将该成功清单回传到远端
-       Branch/{BranchCurrent}/UploadSuccessList_yyyyMMdd_HHmmssSSS_{MD5}.txt
+       Branch/{BranchCurrent}/UploadSuccessList_yyyyMMdd_HHmmssSSS_{MD5}.jsonl
        （提交分支 = Commit.json 的 BranchSuccess【成功清单专用分支】；
          未登记 BranchSuccess 时回退 BranchMigration，保持原有行为；
          MD5 为内容哈希、大写 hex）。
@@ -53,7 +54,7 @@ DMDCBWD31MigrationFile —— 下载上传清单 → 逐文件 OBS 上传 → �
         Migration.quote-gold.json —— 同一份脚本原样放到哪个分支就读哪份配置，
         各分支因此无需各维护一份脚本副本，合并时配置文件也不会冲突。
         {
-          "UploadFileListPath": "Branch/{BranchCurrent}/UploadFileList_....txt",  // 待下载清单的仓库内路径
+          "UploadFileListPath": "Branch/{BranchCurrent}/UploadFileList.jsonl",  // 待下载清单的仓库内路径
           "OBSCIDRoutes": [                                           // CID 前缀路由（先配置先命中）
             { "FilePrefix": "UpStream/Archive/20260825/HK_HKEX_", "CID": "11..." },
             { "FilePrefix": "UpStream/Archive/20260825/CN_CN_A",   "CID": "22..." }
@@ -78,7 +79,8 @@ DMDCBWD31MigrationFile —— 下载上传清单 → 逐文件 OBS 上传 → �
     - 远端下载/回传依赖环境变量 GIT_COMMIT_TOKEN（由 GitHubCommitContent 读取）；
     - OBS 上传必需 HWC_OBS_ROOT_PREFIX（对象 key 前缀）；可选 HWC_OBS_CALLBACK_URL（回调端点）；
     - 同目录需存在：GitHubCommitContent.py、UpstreamFileList.py、OBSClient.py、
-      Commit.json（取不到远端时的本地回退副本）、Migration.{当前分支}.json。
+      ManifestJsonl.py（清单 JSONL 格式实现）、Commit.json（取不到远端时的本地回退副本）、
+      Migration.{当前分支}.json。
 
 二、运行方式
 ----------------------------------------------------------------------------------------
@@ -108,6 +110,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 import GitHubCommitContent  # noqa: E402
+import ManifestJsonl        # noqa: E402
 import OBSClient            # noqa: E402
 from UpstreamFileList import _repo_root  # noqa: E402
 
@@ -141,7 +144,8 @@ JSON_KEY_ROUTE_CID = "CID"
 # 未登记 / 为空时回退到 BranchMigration（保持该字段引入前的原有行为）
 COMMIT_JSON_KEY_BRANCH_SUCCESS = "BranchSuccess"
 
-# 成功清单文件名模式：UploadSuccessList_yyyyMMdd_HHmmssSSS_{MD5}.txt
+# 成功清单文件名模式：UploadSuccessList_yyyyMMdd_HHmmssSSS_{MD5}.jsonl
+# （内容为 JSONL；扩展名随格式而定，与 ManifestJsonl 的格式约定配套）
 REMOTE_BASE_DIR = "Branch"
 SUCCESS_FILE_PREFIX = "UploadSuccessList"
 
@@ -386,78 +390,59 @@ def _log(message):
 
 
 def parse_manifest_lines(text):
-    """解析清单文本为条目列表（一行一个）
+    """解析清单文本为条目列表（一行一个 JSON 对象）
 
-    现行格式为四元组，**路径在最后一位**（便于“从左按 | 切分、剩余整体作为路径”，
-    即使路径中含 | 也不会错位）：
+    格式约定见同目录 ManifestJsonl.py。此处只负责三件事：
+      - 空行、纯空白行**静默跳过**（清单末尾的换行不会变成一条空条目）；
+      - **非空但解析不出**的行打印告警后跳过——不因单行损坏而中断整轮上传；
+      - 把解析结果原样交给调用方（未知键一并带出，见 ManifestJsonl 的扩展性约定）。
 
-        {最后修改时间}|{SHA1}|{MD5}|{相对路径}
-
-    兼容历史格式（一行只有一个相对路径）：此时 sha1 / md5 / mtime 均为 None，
-    由调用方决定回退策略（当前实现：本地重算 md5，sha1 传 None）。
+    调用方注意：本函数对「整份清单一行都没解析出来」不报错，只返回空列表。
+    main() 会据此判定失败——清单非空却零条目，那是格式不符而非「无内容可处理」。
 
     :param text: 清单全文
-    :return: list[dict]，每项 {"rel_path": str, "sha1": str|None,
-             "md5": str|None, "mtime": str|None}；空行与全空白行忽略
+    :return: list[dict]，每项四键齐全（rel_path 恒为非空字符串，
+             dt / sha1 / md5 无值为 None），顺序与文件行序一致
     """
-    text = (text or "").lstrip("﻿")  # 去掉可能的 BOM
-    entries = []
-    for line in text.splitlines():
-        raw = line.strip()
-        if not raw:
-            continue
-        fields = raw.split("|", 3)   # 至多切 3 次 → 第 4 段保留其余全部内容
-        if len(fields) == 4:
-            mtime, sha1, md5, rel_path = fields
-        else:
-            mtime, sha1, md5, rel_path = None, None, None, raw
-        rel_path = rel_path.strip().replace("\\", "/")
-        if not rel_path:
-            continue
-        entries.append({
-            "rel_path": rel_path,
-            "sha1": (sha1 or "").strip() or None,
-            "md5": (md5 or "").strip() or None,
-            "mtime": (mtime or "").strip() or None,
-        })
+    entries, problems = ManifestJsonl.parse(text)
+    for problem in problems:
+        _log("[WARN] 清单第 %d 行解析失败：%s ｜ %s"
+             % (problem["line"], problem["reason"], problem["excerpt"]))
+    if problems:
+        _log("[WARN] 清单共 %d 行解析失败（已跳过）；若整份清单一行都没解析出来，"
+             "多半是它仍为旧的分隔符格式或已被写坏" % len(problems))
     return entries
 
 
 def entry_has_hash(entry):
-    """判断条目是否带四元组信息（时间戳 / SHA1 / MD5 任一非空）
+    """判断条目是否带内容标识（dt / sha1 / md5 任一非空）
 
-    历史格式（仅路径）的条目三者均为 None；四元组条目三者应齐备，但为容忍
-    上游产出残缺（如 {时间戳}||{MD5}|{路径}），此处按“任一非空”判定。
+    三者全空的条目等价于「只有路径」（历史纯路径行解析后即如此）；
+    带内容标识的条目三者应齐备，但为容忍上游产出残缺（如少了 sha1），
+    此处按“任一非空”判定。实现与上传清单端共用 ManifestJsonl。
 
     :param entry: parse_manifest_lines 的条目 dict
     :return: bool
     """
-    return bool(entry.get("mtime") or entry.get("sha1") or entry.get("md5"))
+    return ManifestJsonl.entry_has_hash(entry)
 
 
 def compose_success_content(entries):
-    """把上传成功的条目拼成“一行一个”的成功清单文本（UTF-8，LF 换行，末行带换行）
+    """把上传成功的条目拼成成功清单文本（JSONL，UTF-8、LF、末行带换行）
 
-    与上传清单（UploadFileList）同一口径，便于下游按同一套规则解析：
-        - 四元组条目 → 原样回写 {最后修改时间}|{SHA1}|{MD5}|{相对路径}
-          （缺失的字段留空，不写 "None"）；
-        - 历史格式条目 → 仍只写相对路径（该条目本就没有哈希可回写）。
+    与上传清单（UploadFileList）**同一格式、同一份实现**（ManifestJsonl），
+    下游因此可以按同一套规则解析：
+
+        - 带内容标识的条目 → 按原值回写 dt / sha1 / md5；
+        - 三者皆空的条目   → 仍写成四键齐全的 JSON 对象，取值空串。
+
+    注意后者**不再退化成「一行一个裸路径」**——裸路径行在 JSONL 下解析不出，
+    会让下游把它判成格式错误。恒写 JSON 对象，是让两类条目在格式上无差别。
 
     :param entries: 上传成功的条目列表（parse_manifest_lines 的元素）
-    :return: 待写入 txt 的完整文本；entries 为空返回空字符串
+    :return: 待写入 jsonl 的完整文本；entries 为空返回空字符串
     """
-    if not entries:
-        return ""
-    lines = []
-    for entry in entries:
-        if entry_has_hash(entry):
-            lines.append("%s|%s|%s|%s" % (entry.get("mtime") or "",
-                                          entry.get("sha1") or "",
-                                          entry.get("md5") or "",
-                                          entry["rel_path"]))
-        else:
-            lines.append(entry["rel_path"])
-    return "\n".join(lines) + "\n"
+    return ManifestJsonl.compose(entries)
 
 
 def load_obs_runtime_env():
@@ -545,13 +530,18 @@ def main(cfg_commit_path=None, cfg_branch_path=None, out_dir=None,
         _log("[FAIL] 下载上传清单失败: %s" % message)
         return 1
     entries = parse_manifest_lines(download.get("text"))
+    # 清单非空却一行都没解析出来 → 格式不符，失败退出。
+    # 若静默当作「空清单」处理，整条上传链路会无声停摆（典型场景：清单还是旧的分隔符格式）
+    if (download.get("text") or "").strip() and not entries:
+        _log("[FAIL] 清单非空但无一行可解析（原因见上方告警）：%s"
+             " —— 判定为格式不符，中止以免静默漏传" % upload_path)
+        return 1
     dl_branch = download.get("branch") or branch_migration
-    with_hash = sum(1 for e in entries if e["md5"])
+    with_hash = sum(1 for e in entries if entry_has_hash(e))
     _log("[INFO] 上传清单下载自 GitHub：%s/%s 分支 %s"
           % (owner, repo, dl_branch))
     _log("[INFO]   ↳ 远程文件：https://github.com/%s/%s/blob/%s/%s"
-          "（共 %d 行：%d 行四元组 {最后修改时间}|{SHA1}|{MD5}|{路径}，"
-          "%d 行历史格式仅含路径）"
+          "（共 %d 行：%d 行带内容标识，%d 行三要素皆空）"
           % (owner, repo, dl_branch, upload_path, len(entries),
              with_hash, len(entries) - with_hash))
 
@@ -570,8 +560,8 @@ def main(cfg_commit_path=None, cfg_branch_path=None, out_dir=None,
             missing_count += 1
             _log("[跳过] 本地文件不存在: %s" % rel_path)
             continue
-        # 回调口径哈希：优先取清单四元组里已有的值（清单由采集端按 git 最后提交时间 +
-        # 内容 SHA1/MD5 产出）；清单为历史格式（仅路径）时才本地重算 md5、sha1 留空。
+        # 回调口径哈希：优先取清单行里已有的值（清单由采集端按 git 最后提交时间 +
+        # 内容 SHA1/MD5 产出）；该行三要素皆空时才本地重算 md5、sha1 留空。
         if entry["md5"]:
             digest_md5 = entry["md5"]
             digest_sha1 = entry["sha1"]
@@ -599,20 +589,19 @@ def main(cfg_commit_path=None, cfg_branch_path=None, out_dir=None,
         _log("[INFO] 无上传成功的文件，跳过回传 UploadSuccessList")
         return 0
 
-    # ---- 5) 成功清单一行一个写本地临时 txt，并回传远端 ----
-    # 与上传清单同一口径：四元组条目原样回写四元组，历史格式条目仍只写路径
+    # ---- 5) 成功清单一行一个写本地临时 jsonl，并回传远端 ----
+    # 与上传清单同一格式口径（同一份 ManifestJsonl 实现），两类条目都写成 JSON 对象
     content = compose_success_content(ok_entries)
     hash_rows = sum(1 for e in ok_entries if entry_has_hash(e))
-    _log("[INFO] 成功清单 %d 行：%d 行四元组 {最后修改时间}|{SHA1}|{MD5}|{路径}，"
-          "%d 行历史格式仅含路径"
+    _log("[INFO] 成功清单 %d 行（JSONL）：%d 行带内容标识，%d 行三要素皆空"
           % (len(ok_entries), hash_rows, len(ok_entries) - hash_rows))
     digest = _md5_hex_upper(content.encode("utf-8"))
-    file_name = "%s_%s_%s.txt" % (SUCCESS_FILE_PREFIX, _build_timestamp(), digest)
+    file_name = "%s_%s_%s.jsonl" % (SUCCESS_FILE_PREFIX, _build_timestamp(), digest)
     path_key = "%s/%s/%s" % (REMOTE_BASE_DIR, branch_current, file_name)
     out = out_dir or tempfile.gettempdir()
-    local_txt = os.path.join(out, file_name)
+    local_file = os.path.join(out, file_name)
     try:
-        with open(local_txt, "w", encoding="utf-8", newline="\n") as f:
+        with open(local_file, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
     except OSError as e:
         _log("[FAIL] 写入本地成功清单失败: %s" % e)
@@ -620,11 +609,11 @@ def main(cfg_commit_path=None, cfg_branch_path=None, out_dir=None,
 
     commit = commit_fn or GitHubCommitContent.commit_content_file
     try:
-        result = commit(path_key, local_txt, branch=branch_success,
+        result = commit(path_key, local_file, branch=branch_success,
                         commit_msg="UploadSuccessList @%s" % _build_timestamp())
     finally:
         try:
-            os.remove(local_txt)
+            os.remove(local_file)
         except OSError:
             pass
 

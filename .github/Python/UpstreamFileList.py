@@ -41,7 +41,7 @@ UpstreamFileList —— 扫描仓库收集上游数据文件相对路径清单�
     paths = UpstreamFileList.collect(extensions=(".json", ".txt"))  # 覆盖默认后缀清单
     paths = UpstreamFileList.collect(repo_root="D:/other/repo")     # 显式指定扫描根目录
 
-【示例 4：连同每个文件的内容哈希一起收集（供清单写成四元组用）】
+【示例 4：连同每个文件的内容哈希一起收集（供清单写成 JSONL 用）】
 
     entries = UpstreamFileList.collect_with_digests()
     # list[dict]，每项 {"rel_path": ..., "sha1": ..., "md5": ...}，哈希为大写 hex

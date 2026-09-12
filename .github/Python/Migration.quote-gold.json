@@ -1,5 +1,5 @@
 {
-  "UploadFileListPath": "Branch/quote-gold/UploadFileList.txt",
+  "UploadFileListPath": "Branch/quote-gold/UploadFileList.jsonl",
   "OBSCIDRoutes": [
     { "FilePrefix": "Data/Demo/", "CID": "3501806882199176893" },
     { "FilePrefix": "Data/Test/", "CID": "4501806882199176893" }
