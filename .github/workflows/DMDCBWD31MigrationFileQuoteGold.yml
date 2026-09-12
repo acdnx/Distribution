@@ -9,7 +9,7 @@ name: DMDCBWD31MigrationFileQuoteGold
 #      凌晨 04:00）。注意：schedule 只在仓库【默认分支】上已存在的工作流文件生效，
 #      请确保本文件已合入默认分支（如 main）。
 #   2. 手动：workflow_dispatch，可在 Run workflow 面板输入/选择要执行的具体分支
-#      （默认 dev；该分支需包含 DMDCBWD31MigrationFile.py 及同目录依赖模块）。
+#      （默认 quote-gold；该分支需包含 DMDCBWD31MigrationFile.py 及同目录依赖模块）。
 on:
   schedule:
     - cron: '0 20 * * *'
@@ -25,10 +25,10 @@ jobs:
   DMDCBWD31MigrationFile:
     runs-on: ubuntu-latest
     steps:
-      # 检出所选分支：手动触发用输入的分支，定时触发（无 inputs）回落 dev
+      # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 quote-gold
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch || 'dev' }}
+          ref: ${{ inputs.branch || 'quote-gold' }}
 
       - uses: actions/setup-python@v5
         with:
@@ -44,9 +44,9 @@ jobs:
           # 可选：区域/桶（缺省由脚本按 cn-south-1 / gza 默认；配置后覆盖）
           HWC_OBS_REGION_ID: ${{ vars.HWC_OBS_REGION_ID }}
           HWC_OBS_BUCKET: ${{ vars.HWC_OBS_BUCKET }}
-          # 必填：OBS 对象 key 前缀（原 Upstream.json 的 OBSRootPrefix，已移出配置文件，改走 Secret）
+          # 必填：OBS 对象 key 前缀（原配置文件的 OBSRootPrefix，已移出配置文件，改走 Secret）
           HWC_OBS_ROOT_PREFIX: ${{ secrets.HWC_OBS_ROOT_PREFIX }}
-          # 可选：服务端原生回调端点（原 Upstream.json 的 CallbackUrl，已移出配置文件；
+          # 可选：服务端原生回调端点（原配置文件的 CallbackUrl，已移出配置文件；
           #       未设置则不上 x-obs-callback 头，不回调）
           HWC_OBS_CALLBACK_URL: ${{ secrets.HWC_OBS_CALLBACK_URL }}
         run: python3 .github/Python/DMDCBWD31MigrationFile.py
