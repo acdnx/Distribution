@@ -1,23 +1,5 @@
 name: AggregateUploadFileList
 
-# 用途：把 Branch/{branch}/ 下所有 UploadFileList_开头的清单 jsonl，
-#       增量聚合（去重、保留首次出现顺序）到同目录的 UploadFileList.jsonl，
-#       并删除这些已被聚合的分片文件，最后把结果提交回本分支。
-#
-#       聚合逻辑在 .github/Python/AggregateUploadFileList.py（本步骤只调用它）。
-#
-# 触发：Migration 分支上 Branch/{branch}/UploadFileList_*.jsonl 发生增删改时。
-#       {branch} 不唯一（如 quote、quote-gold 等），脚本逐个目录处理。
-#
-# 防自触发（三重保险）：
-#   1. 本工作流用仓库自带的 GITHUB_TOKEN 推送 —— GitHub 规定 GITHUB_TOKEN
-#      产生的事件不会再触发新的 workflow run；
-#   2. 提交信息带 [skip ci]，GitHub 对该 push 跳过全部工作流；
-#   3. 作业级 if 再校验一次提交信息，兜住有人改成 PAT 推送的情况。
-#
-# 注意：聚合结果写的是 UploadFileList.jsonl，不匹配下方的 paths 过滤器
-#      （过滤器要求 UploadFileList_ 前缀），但“删除分片”这一步会匹配，
-#      故第 1、2 条防自触发是必需的，不是冗余。
 on:
   push:
     branches:
@@ -29,7 +11,6 @@ on:
 permissions:
   contents: write
 
-# 串行化：避免两次几乎同时的推送各自提交后互相把对方顶掉
 concurrency:
   group: AggregateUploadFileList-${{ github.ref }}
   cancel-in-progress: false

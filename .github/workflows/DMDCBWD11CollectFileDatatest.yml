@@ -1,17 +1,5 @@
 name: DMDCBWD11CollectFileDatatest
 
-# DMDCBWD11CollectFile：收集仓库数据文件清单 -> 上传远端 BranchMigration（Migration）
-# （执行所选分支下 .github/Python/DMDCBWD11CollectFile.py；命名沿革：
-#   UpstreamFile.py → Migration11UpstreamFile.py → DMDCBWD11CollectFile.py）
-#
-# 触发方式：
-#   1. 定时：每天自动触发一次（cron 30 18 * * * = 18:30 UTC = 北京时间次日 02:30）。
-#      排期约定：11 系列（采集）先跑，31 系列（迁移）晚 2 小时；同系列三个分支共用
-#      concurrency 组 "DMDCBWD11-collect" **串行执行**（排队而非并发）；三条 cron 各错开 15 分钟。
-#      注意：schedule 只在仓库【默认分支】上已存在的工作流文件生效，
-#      请确保本文件已合入默认分支（如 dev）。
-#   2. 手动：workflow_dispatch，可在 Run workflow 面板输入/选择要执行的具体分支
-#      （默认 datatest；该分支需包含 DMDCBWD11CollectFile.py 及同目录依赖模块）。
 on:
   schedule:
     - cron: '30 18 * * *'
@@ -23,10 +11,6 @@ on:
         required: false
         default: datatest
 
-# 串行化：与同系列另两个工作流**共用同一个组名** —— 同一时刻只跑一个，其余排队等待
-# （cancel-in-progress: false = 排队，而不是取消已在跑的那个）。
-# 注意：GitHub 对同一 concurrency 组只保留「1 个运行中 + 1 个待运行」；若前一个跑得过久、
-# 第三个又到点，待运行的那个会被新来的顶掉 —— 这里靠 15 分钟错峰规避。
 concurrency:
   group: DMDCBWD11-collect
   cancel-in-progress: false
