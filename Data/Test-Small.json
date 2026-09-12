@@ -1,0 +1,6 @@
+{
+  "name": "small-sample",
+  "purpose": "Distribution 管线测试样本（小文件）",
+  "sizeHint": "small",
+  "validJson": true
+}
