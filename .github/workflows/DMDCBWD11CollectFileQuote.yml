@@ -1,18 +1,8 @@
 name: DMDCBWD11CollectFileQuote
 
-# DMDCBWD11CollectFile：收集仓库数据文件清单 -> 上传远端 BranchMigration（Migration）
-# （执行所选分支下 .github/Python/DMDCBWD11CollectFile.py；命名沿革：
-#   UpstreamFile.py → Migration11UpstreamFile.py → DMDCBWD11CollectFile.py）
-#
-# 触发方式：
-#   1. 定时：每天自动触发一次（cron 0 20 * * * = 每天 20:00 UTC = 北京时间次日
-#      凌晨 04:00）。注意：schedule 只在仓库【默认分支】上已存在的工作流文件生效，
-#      请确保本文件已合入默认分支（如 main）。
-#   2. 手动：workflow_dispatch，可在 Run workflow 面板输入/选择要执行的具体分支
-#      （默认 quote；该分支需包含 DMDCBWD11CollectFile.py 及同目录依赖模块）。
 on:
   schedule:
-    - cron: '0 20 * * *'
+    - cron: '0 18 * * *'
   workflow_dispatch:
     inputs:
       branch:
@@ -20,6 +10,10 @@ on:
         type: string
         required: false
         default: quote
+
+concurrency:
+  group: DMDCBWD11-collect
+  cancel-in-progress: false
 
 jobs:
   DMDCBWD11CollectFile:
