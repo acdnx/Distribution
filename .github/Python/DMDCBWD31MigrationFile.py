@@ -30,12 +30,16 @@ DMDCBWD31MigrationFile —— 下载上传清单 → 逐文件 OBS 上传 → �
     4. 汇总上传成功的文件，一行一个写入本地临时 txt；
     5. 调用 GitHubCommitContent.commit_content_file 将该成功清单回传到远端
        Branch/{BranchCurrent}/UploadSuccessList_yyyyMMdd_HHmmssSSS_{MD5}.txt
-       （提交分支 = Commit.json 的 BranchMigration；MD5 为内容哈希、大写 hex）。
+       （提交分支 = Commit.json 的 BranchSuccess【成功清单专用分支】；
+         未登记 BranchSuccess 时回退 BranchMigration，保持原有行为；
+         MD5 为内容哈希、大写 hex）。
 
 配置来源
 ----------------------------------------------------------------------------------------
-    Commit.json（目标仓库身份，GitHubCommitContent 默认值）：
-        { "Owner": "ACANX", "Repo": "Dist", "BranchMigration": "Migration", ... }
+    Commit.json（目标仓库身份 / 各流程回传分支，GitHubCommitContent 默认值）：
+        { "Owner": "ACANX", "Repo": "Dist", "BranchMigration": "Migration",
+          "BranchSuccess": "Success", "BranchDelete": "Delete" }
+        BranchSuccess = UploadSuccessList 成功清单的回传分支（未登记则回退 BranchMigration）
 
     Upstream.json（仓库内路径类配置；OBS 前缀 / 回调端点已移出，改走环境变量）：
         {
@@ -112,6 +116,10 @@ JSON_KEY_OBS_CID_ROUTES = "OBSCIDRoutes"
 JSON_KEY_ROUTE_FILE_PREFIX = "FilePrefix"
 JSON_KEY_ROUTE_CID = "CID"
 
+# Commit.json 中「成功清单回传分支」键：UploadSuccessList 提交到该分支；
+# 未登记 / 为空时回退到 BranchMigration（保持该字段引入前的原有行为）
+COMMIT_JSON_KEY_BRANCH_SUCCESS = "BranchSuccess"
+
 # 成功清单文件名模式：UploadSuccessList_yyyyMMdd_HHmmssSSS_{MD5}.txt
 REMOTE_BASE_DIR = "Branch"
 SUCCESS_FILE_PREFIX = "UploadSuccessList"
@@ -158,6 +166,34 @@ def load_commit_identity(cfg_path=None):
         return None, "Commit.json 缺少登记字段: %s" % "、".join(missing)
     return {"owner": raw["owner"], "repo": raw["repo"],
             "branch_migration": raw["branch_migration"]}, None
+
+
+def load_success_branch(cfg_path=None, fallback=""):
+    """读取 Commit.json 的 BranchSuccess（UploadSuccessList 成功清单的回传分支）
+
+    该字段只有本流程使用，故不走 GitHubCommitContent.load_commit_config（其返回的
+    dict 不含该键），在此按同目录同文件自行读取；文件名沿用
+    GitHubCommitContent.COMMIT_CONFIG_FILE，避免两处各写一份字面量。
+
+    读取失败 / 顶层非对象 / 字段缺失 / 字段为空串时，一律回退 fallback，
+    以保证未登记该字段的既有部署行为不变（调用方传 BranchMigration）。
+
+    :param cfg_path: Commit.json 路径；None = 同目录默认
+    :param fallback: 解析不出 BranchSuccess 时的回退分支
+    :return: 分支名（非空字符串）
+    """
+    path = cfg_path or os.path.join(
+        _SCRIPT_DIR, GitHubCommitContent.COMMIT_CONFIG_FILE)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return fallback
+    if not isinstance(data, dict):
+        return fallback
+    value = data.get(COMMIT_JSON_KEY_BRANCH_SUCCESS)
+    value = str(value).strip() if value is not None else ""
+    return value or fallback
 
 
 def load_upstream_upload_settings(cfg_path=None):
@@ -332,6 +368,10 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
         return 1
     owner, repo, branch_migration = (identity["owner"], identity["repo"],
                                      identity["branch_migration"])
+    # 成功清单（UploadSuccessList）回传分支：Commit.json 的 BranchSuccess；
+    # 未登记该字段时回退 BranchMigration，保持原有行为
+    branch_success = load_success_branch(cfg_commit_path,
+                                         fallback=branch_migration)
     settings, err = load_upstream_upload_settings(cfg_upstream_path)
     if settings is None:
         _log("[FAIL] %s" % err)
@@ -345,6 +385,10 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
         return 1
     _log("[INFO] 目标仓库 = %s/%s | 迁移分支 = %s（BranchMigration）| Branch 目录段 = %s"
           % (owner, repo, branch_migration, branch_current))
+    _log("[INFO] 成功清单回传分支 = %s（Commit.json 的 %s%s）"
+          % (branch_success, COMMIT_JSON_KEY_BRANCH_SUCCESS,
+             "" if branch_success != branch_migration
+             else "，未登记或为空，已回退 BranchMigration"))
     _log("[INFO] OBS 对象前缀（env %s）= %s" % (ENV_OBS_ROOT_PREFIX, root_prefix))
     if callback_url:
         _log("[INFO] 上传成功后服务端原生回调（env %s）：%s"
@@ -423,7 +467,7 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
 
     commit = commit_fn or GitHubCommitContent.commit_content_file
     try:
-        result = commit(path_key, local_txt, branch=branch_migration,
+        result = commit(path_key, local_txt, branch=branch_success,
                         commit_msg="UploadSuccessList @%s" % _build_timestamp())
     finally:
         try:
@@ -433,10 +477,10 @@ def main(cfg_commit_path=None, cfg_upstream_path=None, out_dir=None,
 
     if isinstance(result, dict) and result.get("success"):
         _log("[PASS] 成功清单已回传 %s/%s 分支 %s：%s（http_status=%s）"
-              % (owner, repo, branch_migration, path_key, result.get("http_status")))
+              % (owner, repo, branch_success, path_key, result.get("http_status")))
         return 0
     message = result.get("message") if isinstance(result, dict) else result
-    _log("[FAIL] 成功清单回传失败: %s" % message)
+    _log("[FAIL] 成功清单回传失败（目标分支 %s）: %s" % (branch_success, message))
     return 1
 
 
