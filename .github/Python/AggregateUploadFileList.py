@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AggregateUploadFileList —— 把 Branch/{branch}/ 下的 UploadFileList_*.txt 增量聚合进 UploadFileList.txt
+AggregateUploadFileList —— 把 Branch/{branch}/ 下的 UploadFileList_*.jsonl 增量聚合进 UploadFileList.jsonl
 ========================================================================================
 
 一、工具定位与能力
 ----------------------------------------------------------------------------------------
 承接采集端（DMDCBWD11CollectFile）产出的分片清单：它在 Branch/{branch}/ 下不断写入
-形如 UploadFileList_yyyyMMdd_HHmmssSSS_{MD5}.txt 的分片；本工具把同目录下的所有分片
-**增量聚合**到一个 UploadFileList.txt（即“待上传队列”），并删除已并入的分片。
+形如 UploadFileList_yyyyMMdd_HHmmssSSS_{MD5}.jsonl 的分片；本工具把同目录下的所有分片
+**增量聚合**到一个 UploadFileList.jsonl（即“待上传队列”），并删除已并入的分片。
 
     1. 扫描 Branch/ 下的一级子目录（每个子目录即一个 {branch}，如 quote、quote-gold），
        逐个独立处理；
-    2. 每个目录内：取现有 UploadFileList.txt 的行在前，分片按**文件名升序**依次追加
+    2. 每个目录内：取现有 UploadFileList.jsonl 的行在前，分片按**文件名升序**依次追加
        （文件名内嵌 yyyyMMdd_HHmmssSSS，故等价于时间顺序）；
     3. 按行去重：同一行只保留首次出现；忽略空行与纯空白行；行尾统一 LF、以换行结尾；
-    4. 写入同目录的 UploadFileList.txt，并删除本次并入的全部分片；
+    4. 写入同目录的 UploadFileList.jsonl，并删除本次并入的全部分片；
     5. 目录内无分片时整步跳过（幂等，不产生任何改动）。
 
 二、清单行格式
 ----------------------------------------------------------------------------------------
-现行格式为四元组（路径在最后一位，便于“从左按 | 切分、剩余整体作为路径”）：
+现行格式为 JSONL：一行一个 JSON 对象，键序固定 dt → sha1 → md5 → rel_path
+（格式细节见 ManifestJsonl.py）：
 
-    {最后修改时间}|{SHA1}|{MD5}|{相对路径}
+    {"dt":"20260912124805000","sha1":"8A38…","md5":"07BE…","rel_path":"Data/Demo.json"}
 
-本工具**不解析行内容**，只按整行去重——行内容稳定（时间戳取 git 提交时间）时，
-整行去重等价于按路径去重；采集端重复产出的同一文件同一版本会被自然折叠。
+本工具**不解析行内容**，只按整行去重——行内容稳定（dt 取 git 提交时间，且序列化是
+确定性的：同内容必得同字节）时，整行去重等价于按路径去重；采集端重复产出的同一文件
+同一版本会被自然折叠。
+
+将来清单新增字段时，本环节同样无需改动：整行原样搬运，不认得的键自然跟着走。
 
 三、运行方式
 ----------------------------------------------------------------------------------------
@@ -48,9 +52,9 @@ import sys
 # 常量（默认值）
 # ---------------------------------------------------------------------------
 
-BASE_DIR = 'Branch'                 # {branch} 的父目录
-TARGET_NAME = 'UploadFileList.txt'  # 聚合目标（注意：不带下划线）
-PART_PREFIX = 'UploadFileList_'     # 分片前缀，其后必为下划线 → 天然不匹配目标文件名
+BASE_DIR = 'Branch'                     # {branch} 的父目录
+TARGET_NAME = 'UploadFileList.jsonl'    # 聚合目标（注意：不带下划线）
+PART_PREFIX = 'UploadFileList_'         # 分片前缀，其后必为下划线 → 天然不匹配目标文件名
 
 
 def _ensure_console_utf8():
@@ -85,9 +89,9 @@ def merge_dir(dir_path):
     :return: (是否改动, 并入分片数, 结果行数, 被删除文件路径列表)
     """
     target = os.path.join(dir_path, TARGET_NAME)
-    parts = sorted(glob.glob(os.path.join(dir_path, PART_PREFIX + "*.txt")))
+    parts = sorted(glob.glob(os.path.join(dir_path, PART_PREFIX + "*.jsonl")))
     if not parts:
-        print("[SKIP] %s：目录下无 %s*.txt 分片，跳过（不产生提交）"
+        print("[SKIP] %s：目录下无 %s*.jsonl 分片，跳过（不产生提交）"
               % (dir_path, PART_PREFIX))
         return False, 0, 0, []
 
@@ -136,7 +140,7 @@ def merge_dir(dir_path):
 
 
 def main():
-    """主流程：逐 {branch} 目录聚合分片 → 重写 UploadFileList.txt → 删除分片
+    """主流程：逐 {branch} 目录聚合分片 → 重写 UploadFileList.jsonl → 删除分片
 
     :return: 退出码：0 = 正常结束；1 = 致命失败
     """

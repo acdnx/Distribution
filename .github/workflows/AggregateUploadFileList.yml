@@ -1,12 +1,12 @@
 name: AggregateUploadFileList
 
-# 用途：把 Branch/{branch}/ 下所有 UploadFileList_开头的清单 txt，
-#       增量聚合（去重、保留首次出现顺序）到同目录的 UploadFileList.txt，
+# 用途：把 Branch/{branch}/ 下所有 UploadFileList_开头的清单 jsonl，
+#       增量聚合（去重、保留首次出现顺序）到同目录的 UploadFileList.jsonl，
 #       并删除这些已被聚合的分片文件，最后把结果提交回本分支。
 #
 #       聚合逻辑在 .github/Python/AggregateUploadFileList.py（本步骤只调用它）。
 #
-# 触发：Migration 分支上 Branch/{branch}/UploadFileList_*.txt 发生增删改时。
+# 触发：Migration 分支上 Branch/{branch}/UploadFileList_*.jsonl 发生增删改时。
 #       {branch} 不唯一（如 quote、quote-gold 等），脚本逐个目录处理。
 #
 # 防自触发（三重保险）：
@@ -15,7 +15,7 @@ name: AggregateUploadFileList
 #   2. 提交信息带 [skip ci]，GitHub 对该 push 跳过全部工作流；
 #   3. 作业级 if 再校验一次提交信息，兜住有人改成 PAT 推送的情况。
 #
-# 注意：聚合结果写的是 UploadFileList.txt，不匹配下方的 paths 过滤器
+# 注意：聚合结果写的是 UploadFileList.jsonl，不匹配下方的 paths 过滤器
 #      （过滤器要求 UploadFileList_ 前缀），但“删除分片”这一步会匹配，
 #      故第 1、2 条防自触发是必需的，不是冗余。
 on:
@@ -23,7 +23,7 @@ on:
     branches:
       - Migration
     paths:
-      - 'Branch/*/UploadFileList_*.txt'
+      - 'Branch/*/UploadFileList_*.jsonl'
   workflow_dispatch:        # 手动触发：用于补跑历史存量（如当前 quote 目录下待聚合的分片）
 
 permissions:
@@ -72,7 +72,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A -- Branch
-          git commit -m "chore(migration): aggregate UploadFileList_*.txt into UploadFileList.txt [skip ci]"
+          git commit -m "chore(migration): aggregate UploadFileList_*.jsonl into UploadFileList.jsonl [skip ci]"
           echo "[INFO] 本次提交："
           git show --stat --oneline HEAD | sed 's/^/       /'
           # 并发或其他推送可能已推进远端：rebase 后重试，最多 3 次
