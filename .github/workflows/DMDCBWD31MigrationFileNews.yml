@@ -1,4 +1,4 @@
-name: DMDCBWD31MigrationFile{BRANCH_PASCAL}
+name: DMDCBWD31MigrationFileNews
 
 # ⚠️ 这是 branch-template 模板分支上的**工作流模板**：文件名里的 {BRANCH_PASCAL}、正文里的
 #    {BRANCH} 与 {CRON_MIGRATE} 都是占位符 —— 在模板分支上它不会运行、也不该运行
@@ -20,14 +20,14 @@ name: DMDCBWD31MigrationFile{BRANCH_PASCAL}
 #      （默认 {BRANCH}；该分支需包含 DMDCBWD31MigrationFile.py 及同目录依赖模块）。
 on:
   schedule:
-    - cron: '{CRON_MIGRATE}'
+    - cron: '45 20 * * *'
   workflow_dispatch:
     inputs:
       branch:
         description: 选择要执行工作流的分支（需包含 .github/Python/DMDCBWD31MigrationFile.py 及同目录依赖模块）
         type: string
         required: false
-        default: '{BRANCH}'
+        default: 'news'
 
 # 串行化：与同系列其它分支**共用同一个组名** —— 同一时刻只跑一个，其余排队等待
 # （cancel-in-progress: false = 排队，而不是取消已在跑的那个）。
@@ -44,7 +44,7 @@ jobs:
       # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 {BRANCH}
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch || '{BRANCH}' }}
+          ref: ${{ inputs.branch || 'news' }}
 
       - uses: actions/setup-python@v5
         with:
