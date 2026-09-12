@@ -1,0 +1,141 @@
+name: AggregateUploadFileList
+
+# 用途：把 Branch/{branch}/ 下所有 UploadFileList_开头的清单 txt，
+#       增量聚合（去重、保留首次出现顺序）到同目录的 UploadFileList.txt，
+#       并删除这些已被聚合的分片文件，最后把结果提交回本分支。
+#
+# 触发：Migration 分支上 Branch/{branch}/UploadFileList_*.txt 发生增删改时。
+#       {branch} 不唯一（如 quote、quote-gold 等），脚本逐个目录处理。
+#
+# 防自触发（三重保险）：
+#   1. 本工作流用仓库自带的 GITHUB_TOKEN 推送 —— GitHub 规定 GITHUB_TOKEN
+#      产生的事件不会再触发新的 workflow run；
+#   2. 提交信息带 [skip ci]，GitHub 对该 push 跳过全部工作流；
+#   3. 作业级 if 再校验一次提交信息，兜住有人改成 PAT 推送的情况。
+#
+# 注意：聚合结果写的是 UploadFileList.txt，不匹配下方的 paths 过滤器
+#      （过滤器要求 UploadFileList_ 前缀），但“删除分片”这一步会匹配，
+#      故第 1、2 条防自触发是必需的，不是冗余。
+on:
+  push:
+    branches:
+      - Migration
+    paths:
+      - 'Branch/*/UploadFileList_*.txt'
+  workflow_dispatch:        # 手动触发：用于补跑历史存量（如当前 quote 目录下待聚合的分片）
+
+permissions:
+  contents: write
+
+# 串行化：避免两次几乎同时的推送各自提交后互相把对方顶掉
+concurrency:
+  group: AggregateUploadFileList-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message || '', '[skip ci]') }}
+    steps:
+      - name: CheckoutMigration
+        uses: actions/checkout@v4
+        with:
+          ref: Migration
+          fetch-depth: 0
+          # 默认即 GITHUB_TOKEN；显式写出以强调“用内置 token 推送”这一防自触发前提
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: AggregateUploadFileList
+        run: |
+          python3 - <<'PY'
+          # -*- coding: utf-8 -*-
+          """把 Branch/{branch}/ 下的 UploadFileList_*.txt 增量聚合进 UploadFileList.txt
+
+          规则：
+            - 逐目录（Branch 下的一级子目录，即 {branch}）独立处理；
+            - 顺序 = 现有 UploadFileList.txt 的行在前，分片按文件名升序（文件名内嵌
+              yyyyMMdd_HHmmssSSS 时间戳，故等价于时间顺序）依次追加；
+            - 去重：同一行只保留首次出现；忽略空行；行尾统一 LF；
+            - 聚合后删除本次并入的分片文件；无分片则整步跳过（幂等）。
+          """
+          import glob
+          import os
+          import sys
+
+          BASE_DIR = 'Branch'                 # {branch} 的父目录
+          TARGET_NAME = 'UploadFileList.txt'  # 聚合目标（注意：不带下划线）
+          PART_PREFIX = 'UploadFileList_'     # 分片前缀，其后必为下划线 → 天然不匹配目标文件名
+
+          def merge_dir(dir_path):
+              """聚合单个 {branch} 目录；返回 (是否改动, 并入分片数, 结果行数)"""
+              target = os.path.join(dir_path, TARGET_NAME)
+              parts = sorted(glob.glob(os.path.join(dir_path, PART_PREFIX + '*.txt')))
+              if not parts:
+                  return False, 0, 0
+
+              seen = set()
+              lines = []
+              sources = ([target] if os.path.isfile(target) else []) + parts
+              for src in sources:
+                  with open(src, 'r', encoding='utf-8') as fh:
+                      for raw in fh:
+                          line = raw.rstrip('\r\n').strip()
+                          if not line or line in seen:
+                              continue
+                          seen.add(line)
+                          lines.append(line)
+
+              content = ''.join(line + '\n' for line in lines)
+              with open(target, 'w', encoding='utf-8', newline='\n') as fh:
+                  fh.write(content)
+              for src in parts:
+                  os.remove(src)
+              return True, len(parts), len(lines)
+
+          if not os.path.isdir(BASE_DIR):
+              print('[INFO] 无 %s 目录，跳过' % BASE_DIR)
+              sys.exit(0)
+
+          dirs = sorted(d for d in glob.glob(os.path.join(BASE_DIR, '*'))
+                        if os.path.isdir(d))
+          total_dirs = 0
+          for dir_path in dirs:
+              changed, part_count, line_count = merge_dir(dir_path)
+              if changed:
+                  total_dirs += 1
+                  print('[PASS] %s：并入 %d 个分片，聚合后 %d 行 → %s'
+                        % (dir_path, part_count, line_count,
+                           os.path.join(dir_path, TARGET_NAME)))
+              else:
+                  print('[SKIP] %s：无 UploadFileList_*.txt 分片' % dir_path)
+
+          if total_dirs == 0:
+              print('[INFO] 本次无任何目录需要聚合（幂等跳过，不产生提交）')
+          else:
+              print('[INFO] 完成：%d 个目录已聚合' % total_dirs)
+          PY
+
+      - name: CommitAndPush
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain -- Branch)" ]; then
+            echo "[INFO] Branch/ 下无变更，跳过提交"
+            exit 0
+          fi
+          echo "[INFO] 待提交变更："
+          git status --porcelain -- Branch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- Branch
+          git commit -m "chore(migration): aggregate UploadFileList_*.txt into UploadFileList.txt [skip ci]"
+          # 并发或其他推送可能已推进远端：rebase 后重试，最多 3 次
+          for attempt in 1 2 3; do
+            if git push origin HEAD:Migration; then
+              echo "[PASS] 已提交到 Migration（第 ${attempt} 次尝试）"
+              exit 0
+            fi
+            echo "[WARN] 推送失败，rebase 后重试（第 ${attempt} 次）"
+            git pull --rebase --autostash origin Migration
+          done
+          echo "[FAIL] 推送连续 3 次失败"
+          exit 1
