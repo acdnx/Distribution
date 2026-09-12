@@ -71,7 +71,7 @@ from UpstreamFileList import collect                 # noqa: E402
 # ---------------------------------------------------------------------------
 
 # 分支配置文件（与本文件同目录）
-UPSTREAM_JSON = "Upstream.json"
+UPSTREAM_JSON = "Migration.quote.json"
 
 # Upstream.json 中“迁移文件驻留 / 上传目标远端分支”字段名（统一为 BranchMigration，
 # 默认 "Migration"；原命名 BranchUpstream / UpstreamBranch 已废弃，勿再使用）
