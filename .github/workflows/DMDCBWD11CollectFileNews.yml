@@ -1,15 +1,15 @@
-name: DMDCBWD11CollectFileDatatest
+name: DMDCBWD11CollectFileNews
 
 on:
   schedule:
-    - cron: '30 18 * * *'
+    - cron: '45 18 * * *'
   workflow_dispatch:
     inputs:
       branch:
         description: 选择要执行工作流的分支（需包含 .github/Python/DMDCBWD11CollectFile.py 及同目录依赖模块）
         type: string
         required: false
-        default: datatest
+        default: 'news'
 
 concurrency:
   group: DMDCBWD11-collect
@@ -19,10 +19,10 @@ jobs:
   DMDCBWD11CollectFile:
     runs-on: ubuntu-latest
     steps:
-      # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 datatest
+      # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 news
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch || 'datatest' }}
+          ref: ${{ inputs.branch || 'news' }}
 
       - uses: actions/setup-python@v5
         with:

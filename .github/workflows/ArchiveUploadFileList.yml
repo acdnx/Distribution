@@ -1,23 +1,5 @@
 name: ArchiveUploadFileList
 
-# 用途：排空「待上传队列」Branch/{branch}/UploadFileList.jsonl ——
-#       把【已确认上传成功】的行移出队列，并归档到
-#           Migration:Archive/{branch}/ArchiveUploadFileList_yyyyMMddHHmmss.jsonl
-#
-#       归档逻辑在 .github/Python/ArchiveUploadFileList.py —— 该脚本**存放在
-#       Migration 分支**：本工作流检出 Migration 后从该检出执行它，使脚本与它操作的
-#       Branch/ 队列同处一个分支（否则本步骤会找不到脚本）。本步骤只调用它。
-#
-# 为什么需要它：队列来自采集（每天全量扫描后聚合），而已上传成功的源文件会被
-#   OBS 回调（Cloudflare Worker）从原分支删除。若不排空，队列里会长期堆积
-#   “本地文件已不存在”的死条目，上传端每轮都要遍历它们，越积越慢。
-#
-# 判定依据（事实来源）：Cloudflare Worker 在 OBS 落盘成功后写入 **Delete 分支** 的
-#   回调元数据 Archive/Branch/{branch}/{cid}/UploadSuccessCallback_{日期}_{时间}_{MD5}.json
-#   匹配规则（路径 + MD5 + 回调时间不早于行时间）见脚本模块文档。
-#
-# 触发：每日定时 + 手动。**注意 schedule 要求工作流文件存在于默认分支**，
-#       故本文件放在默认分支；运行时显式检出 Migration（队列）并取 Delete（回调记录）。
 on:
   schedule:
     - cron: '0 21 * * *'      # 每天 UTC 21:00 = 北京时间次日 05:00（在采集 18:00 与上传 20:00–20:30 之后）
