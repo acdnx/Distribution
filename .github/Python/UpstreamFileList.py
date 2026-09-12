@@ -50,7 +50,7 @@ UpstreamFileList —— 扫描仓库收集上游数据文件相对路径清单�
 
 三、采集语义
 ----------------------------------------------------------------------------------------
-    - 默认后缀清单见模块常量 DATA_EXTENSIONS = (".json", ".jsonl", ".mvsv")，
+    - 默认后缀清单见模块常量 DATA_EXTENSIONS = (".json", ".jsonl", ".mvsv", ".log")，
       匹配时忽略大小写（xxx.JSON 也命中）；
     - 路径以【仓库根目录】为基准返回相对路径，统一用 “/” 分隔（与 Git/GitHub 路径
       约定一致），返回前默认按字典序排序，保证清单稳定、可 diff；
@@ -88,8 +88,8 @@ import sys
 # ---------------------------------------------------------------------------
 
 # 需要采集的数据文件扩展名（小写；匹配时忽略大小写）。
-# 说明：默认按需求收集 .json / .jsonl / .mvsv 三类；可通过 collect 参数覆盖。
-DATA_EXTENSIONS = (".json", ".jsonl", ".mvsv")
+# 说明：默认按需求收集 .json / .jsonl / .mvsv / .log 四类；可通过 collect 参数覆盖。
+DATA_EXTENSIONS = (".json", ".jsonl", ".mvsv", ".log")
 
 # 遍历时始终跳过的目录名（无论是否开启隐藏目录排除）
 # 注意：.git 属隐藏目录，本会被"隐藏目录一律跳过"覆盖；此处保留为显式兜底。
@@ -127,7 +127,7 @@ def _normalize_extensions(extensions):
     """把扩展名清单规整为小写、带前导点、无尾随点的元组
 
     :param extensions: 扩展名可迭代对象（可为 None）；每项可带或不带前导点，忽略大小写
-    :return: 规整后的小写扩展名元组，如 ('.json', '.jsonl', '.mvsv')
+    :return: 规整后的小写扩展名元组，如 ('.json', '.jsonl', '.mvsv', '.log')
     """
     if not extensions:
         extensions = DATA_EXTENSIONS
