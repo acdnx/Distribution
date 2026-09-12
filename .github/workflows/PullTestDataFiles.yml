@@ -1,0 +1,80 @@
+name: PullTestDataFiles
+
+# 用途：手动把某个分支 Data 目录下的测试数据（默认 *.json），按**原路径**复制到另一个
+#       分支的相同路径，作为测试数据使用 —— 省去手工下载再上传，也不必等真实数据。
+#
+# 触发：仅 workflow_dispatch（手动）。workflow_dispatch 要求工作流文件存在于**默认分支**，
+#       故本文件与脚本都随默认分支（dev）存放。
+#
+# 实现：不 clone 仓库（仓库较大，clone 一次要拉完整目录树，而测试数据只有十几个文件）。
+#       全程走 GitHub REST API：
+#         ① Git Trees API 一次取回两侧完整文件清单（含每个文件的 blob sha）；
+#         ② 比对 blob sha —— 相同即内容逐字节相同，直接跳过（不下载、不提交）；
+#         ③ 仅对新增/内容不同的文件走 Git Blobs API 取原始字节；
+#         ④ 走 Git Data API 打包成**一个提交**写回目标分支：
+#            blobs → trees（以目标分支当前树为 base_tree）→ commits → 移动分支指针。
+#            建 blob 时即比对服务端 sha 与源 sha，不一致就整批中止，错误内容不落地。
+#       脚本：.github/Python/PullTestDataFiles.py（同分支同目录）。
+#
+# 安全性：
+#   - 只新增/覆盖匹配到的文件，**从不删除**目标分支上的任何文件；
+#   - 分支指针只允许快进（force=false）：目标分支若在运行期间被别处改动，本次不被覆盖；
+#   - 失败即整批不落地：任一文件出错都在建提交之前中止，目标分支保持原样；
+#   - 源分支与目标分支同名时脚本直接失败退出（避免误判为同步成功）；
+#   - 提交信息不带 [skip ci]：本仓没有按 Data/ 推送触发的工作流（采集走 cron），无需抑制。
+#
+# 权限：写入使用 GIT_COMMIT_TOKEN（与采集/归档流程同一个），故本工作流的 GITHUB_TOKEN
+#       只需读权限。若该令牌是限定分支的细粒度令牌，需确认它对目标分支有写权限。
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 源分支（从它的 Data 目录拉取）
+        type: string
+        required: true
+        default: datatest
+      target_branch:
+        description: 目标分支（写到它的相同路径）
+        type: string
+        required: true
+      dry_run:
+        description: 只列出同步计划、不写入
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+# 串行化：同一目标分支同时跑两次会因 sha 冲突互相顶掉，故按目标分支串行
+concurrency:
+  group: PullTestDataFiles-${{ inputs.target_branch }}
+  cancel-in-progress: false
+
+jobs:
+  PullTestDataFiles:
+    runs-on: ubuntu-latest
+    steps:
+      # 固定检出 dev：本工作流与脚本都随默认分支存放，这样无论从哪个 ref 触发，
+      # 跑的都是同一份脚本（与「工具类脚本的家在 dev」这一约定一致）
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: RunPullTestDataFiles
+        env:
+          # 必填：GitHub 写仓库令牌（向目标分支提交测试数据用）
+          GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="--dry-run"
+          fi
+          python3 .github/Python/PullTestDataFiles.py \
+            --source "${{ inputs.source_branch }}" \
+            --target "${{ inputs.target_branch }}" \
+            $ARGS
