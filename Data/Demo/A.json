@@ -1,0 +1,6 @@
+{
+  "name": "A",
+  "dir": "Data/Demo",
+  "note": "branch-template 的测试用样例（二层 json），用于验证嵌套路径原样搬运",
+  "seq": 2
+}
