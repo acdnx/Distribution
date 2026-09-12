@@ -6,11 +6,24 @@ DMDCBWD11CollectFile —— 编排：收集文件清单 → 写本地 txt → �
 
 一、工具定位与能力
 ----------------------------------------------------------------------------------------
-在不 clone 仓库的前提下，把“仓库内数据文件的相对路径清单（manifest）”上传到 GitHub
+在不 clone 仓库的前提下，把“仓库内数据文件的清单（manifest）”上传到 GitHub
 仓库的指定分支，让上游侧拿到一份“本仓库当前有哪些数据文件”的快照。整个流程三步：
 
-    1. 调用同目录 UpstreamFileList.collect() 获取可上传文件的仓库相对路径清单；
-    2. 将清单“一行一个”写入本地临时 txt 文件（UTF-8、LF 换行）；
+    1. 调用同目录 UpstreamFileList.collect_with_digests() 获取可上传文件清单，
+       每个文件附带【内容】的 SHA1 / MD5（大写 hex）；再取该文件在 git 中的
+       最后提交时间（见下）；
+    2. 将清单“一行一个”写入本地临时 txt 文件（UTF-8、LF 换行），每行为四元组：
+
+           {最后修改时间}|{SHA1}|{MD5}|{相对路径}
+
+       - 最后修改时间：该路径在 git 中最后一次被提交的时间，格式
+         yyyyMMddHHmmssSSS、东八区（GMT+8）；稳定值——文件内容不变则同一提交
+         下该字段不变，故四元组可用于「同一文件同一版本」的唯一标识与增量去重。
+         （切勿改用文件系统 mtime：每次 clone/checkout 都会刷新，会让四元组天天变。）
+       - SHA1 / MD5：文件【内容】的哈希，大写 hex；
+       - 相对路径：放最后一位，便于解析时“从左按 | 切分、剩余整体作为路径”，
+         即使路径中含 | 也不会错位。
+
     3. 调用同目录 GitHubCommitContent.commit_content_file 上传该 txt 到本仓库的
        {BranchMigration} 分支（默认 "Migration"）；远端落点 path_key 固定模式：
 
@@ -53,6 +66,7 @@ import datetime
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -64,7 +78,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from GitHubCommitContent import commit_content_file  # noqa: E402
-from UpstreamFileList import collect                 # noqa: E402
+from UpstreamFileList import collect_with_digests, _repo_root  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 常量（默认值）
@@ -155,15 +169,100 @@ def build_timestamp(now=None):
     return dt.strftime("%Y%m%d_%H%M%S") + "%03d" % (dt.microsecond // 1000)
 
 
-def compose_manifest_content(paths):
+# git log 输出的提交起始标记（%x01 + 该提交时间戳秒），用于与文件名行区分。
+# 用不可见控制字符做前缀，避免与真实文件名混淆。
+_GIT_COMMIT_MARK = "\x01"
+
+# 东八区（GMT+8）：清单里所有时间戳统一按此时区格式化
+_TZ_GMT8 = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _fmt_gmt8(epoch):
+    """epoch 秒（可含小数）→ 东八区 yyyyMMddHHmmssSSS
+
+    git 提交时间只有秒级精度，故毫秒位恒为 000；文件 mtime 回退路径则带真实毫秒。
+
+    :param epoch: Unix 时间戳（秒，int 或 float）
+    :return: 形如 "20260912235959123" 的 17 位字符串
+    """
+    dt = datetime.datetime.fromtimestamp(float(epoch), _TZ_GMT8)
+    return dt.strftime("%Y%m%d%H%M%S") + "%03d" % (dt.microsecond // 1000)
+
+
+def git_last_modified_times(rel_paths, repo_root):
+    """取每个路径在 git 中的“最后修改时间”（该路径最后一次被提交的时间）
+
+    单次遍历建好映射，不逐文件调用 git：
+
+        git -c core.quotePath=false log --pretty=format:%x01%ct --name-only \\
+            --diff-filter=AMR
+
+    log 由新到旧输出，故某路径【首次】出现所在的那条提交即其最后一次修改；把重命名（R）
+    也计入，使改名后的新路径取其改名提交的时间（旧路径已不存在，不受影响）。
+
+    时间戳统一按东八区（GMT+8）格式化为 yyyyMMddHHmmssSSS；git 提交时间仅秒级精度，
+    毫秒位恒为 000（保留三位是为了与清单文件名的时间戳口径一致）。
+
+    未提交（untracked）的文件在 git 中查不到，回退取该文件的 mtime，并在返回值中单独
+    计数——这类文件本就处于未落定状态，不保证跨环境一致。
+
+    :param rel_paths: 相对仓库根的路径集合（通常来自 UpstreamFileList.collect_with_digests）
+    :param repo_root: 仓库根目录绝对路径（用于回退取 mtime）
+    :return: (mapping, fallback_count)：
+             mapping = {rel_path: "yyyyMMddHHmmssSSS"}（覆盖全部入参路径）；
+             fallback_count = 回退为 mtime 的路径数
+    :raises RuntimeError: git 不可用、当前目录不在 Git 仓库内，或 git log 执行失败。
+                          此时时间戳无法保证稳定，宁可失败也不产出不可信清单。
+    """
+    wanted = set(rel_paths)
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "core.quotePath=false", "log",
+             "--pretty=format:%x01%ct", "--name-only", "--diff-filter=AMR"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except OSError as e:
+        raise RuntimeError("无法执行 git（%s）；本流程需要 git 以取得稳定的最后修改时间" % e)
+    if proc.returncode != 0:
+        raise RuntimeError("git log 执行失败：%s"
+                           % (proc.stderr or "非 Git 仓库或 git 不可用").strip())
+
+    mapping = {}
+    current = None
+    for line in proc.stdout.splitlines():
+        if line.startswith(_GIT_COMMIT_MARK):
+            current = line[len(_GIT_COMMIT_MARK):].strip()
+        elif line and current and line in wanted and line not in mapping:
+            mapping[line] = _fmt_gmt8(current)
+
+    fallback_count = 0
+    for rel_path in sorted(wanted):
+        if rel_path in mapping:
+            continue
+        try:
+            mapping[rel_path] = _fmt_gmt8(os.path.getmtime(
+                os.path.join(repo_root, rel_path)))
+        except OSError:
+            mapping[rel_path] = _fmt_gmt8(0)
+        fallback_count += 1
+    return mapping, fallback_count
+
+
+def compose_manifest_content(entries):
     """把文件清单拼成“一行一个”的文本（UTF-8，LF 换行，末行带换行）
 
-    :param paths: 相对路径字符串列表（来自 UpstreamFileList.collect）
-    :return: 待写入 txt 的完整文本；paths 为空返回空字符串
+    每行为四元组：{最后修改时间}|{SHA1}|{MD5}|{相对路径}
+    路径放最后一位，便于解析时“从左按 | 切分、剩余整体作为路径”。
+
+    :param entries: dict 列表，每项需含 rel_path / sha1 / md5 / mtime 四个键
+                    （前三个来自 UpstreamFileList.collect_with_digests，
+                      mtime 来自 git_last_modified_times）
+    :return: 待写入 txt 的完整文本；entries 为空返回空字符串
     """
-    if not paths:
+    if not entries:
         return ""
-    return "\n".join(paths) + "\n"
+    lines = ["%s|%s|%s|%s" % (e["mtime"], e["sha1"], e["md5"], e["rel_path"])
+             for e in entries]
+    return "\n".join(lines) + "\n"
 
 
 def write_local_file(local_file, content):
@@ -207,15 +306,34 @@ def main(cfg_path=None, out_dir=None, commit_fn=None, commit_msg=None):
     print("[INFO] 上传目标分支 = %s | 远端路径分支目录 = %s"
           % (target_branch, current_branch))
 
-    # ---- 2) 收集文件清单 ----
-    paths = collect()
-    if not paths:
+    # ---- 2) 收集文件清单（相对路径 + 内容 SHA1/MD5）----
+    entries = collect_with_digests()
+    if not entries:
         print("[INFO] 无可上传文件，正常跳过（未生成清单、未上传）")
         return 0
-    print("[INFO] 收集到 %d 个数据文件" % len(paths))
+
+    # ---- 2b) 取每个文件的 git 最后提交时间（稳定值，四元组唯一性依赖它）----
+    root = _repo_root()
+    if root is None:
+        print("[FAIL] 未能在仓库中找到 .git 入口，无法定位仓库根目录")
+        return 1
+    try:
+        mtime_map, fallback = git_last_modified_times(
+            [e["rel_path"] for e in entries], root)
+    except RuntimeError as e:
+        print("[FAIL] %s" % e)
+        return 1
+    for entry in entries:
+        entry["mtime"] = mtime_map.get(entry["rel_path"], "")
+    print("[INFO] 收集到 %d 个数据文件（时间戳取 git 最后提交时间；"
+          "其中 %d 个未提交、已回退为文件 mtime）" % (len(entries), fallback))
 
     # ---- 3) 组装清单文本、MD5、文件名与远端路径 ----
-    content = compose_manifest_content(paths)
+    content = compose_manifest_content(entries)
+    print("[INFO] 清单内容 %d 行 / %d 字节，前 3 行示例："
+          % (len(entries), len(content.encode("utf-8"))))
+    for line in content.splitlines()[:3]:
+        print("[INFO]   %s" % line)
     digest = hashlib.md5(content.encode("utf-8")).hexdigest().upper()
     timestamp = build_timestamp()
     file_name = make_file_name(timestamp, digest)
