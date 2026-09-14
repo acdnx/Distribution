@@ -8,12 +8,12 @@ on:
   workflow_dispatch:
     inputs:
       code:
-        description: 证券代码（单个，如 IAU；留空 = 取仓库变量 SECU_WEEK_CODES）
+        description: 证券代码（如 IAU；留空 = 取 SecuMetaMapping.jsonl 中的全部 Code）
         type: string
         required: false
         default: ''
       week:
-        description: 目标周 yyyyWW（如 202625；留空 = 自动取最近一个已满两周的周）
+        description: 目标周 yyyyWW（如 202625；留空 = 取该证券最早一条记录所在的周）
         type: string
         required: false
         default: ''
@@ -38,7 +38,7 @@ concurrency:
 jobs:
   SupabaseImportWeekMvsv:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 quote
       - uses: actions/checkout@v4
@@ -56,10 +56,11 @@ jobs:
           # 必填：Supabase 凭据（Data API 读 finv_quote_secu_kline_min 用）
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # 待导出证券：手动触发取输入；定时触发（无 inputs）回落到仓库变量 SECU_WEEK_CODES，
-          # 多个以逗号分隔时**逐个独立处理**（各自查询 / 各自一份文件 / 各自一次提交）
-          SECU_CODE: ${{ inputs.code || vars.SECU_WEEK_CODES }}
-          # 目标周：留空则由脚本自动取「最近一个已满 14 天的周」
+          # 待导出证券：手动触发取输入（可逗号分隔多个）；留空则取脚本同目录
+          # SecuMetaMapping.jsonl 中的全部 Code。多个时**逐个独立处理**
+          # （各自查询 / 各自一份文件 / 各自一次提交）
+          SECU_CODE: ${{ inputs.code }}
+          # 目标周：留空则由脚本取该证券「最早一条记录」所在的周
           WEEK: ${{ inputs.week }}
           SUPABASE_PAGE_SIZE: ${{ inputs.pageSize || '1000' }}
           CURR_BRANCH: ${{ inputs.branch || 'quote' }}
