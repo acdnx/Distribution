@@ -29,7 +29,14 @@ public.finv_quote_secu_kline_min 里「某个证券 + 某个整周」的分钟�
     周 2026-12-27(日) ~ 2027-01-02(六) → 2026-W53 → 202653
     （拿周日起点 2026-12-27 查会得到 2026-W52，整体偏移一周）
 
+**周的选取**：
+    - 显式指定（`WEEK` / argv[2]）时用指定值；
+    - 未指定时，取该证券**在库中最早一条记录（min(ts)）所在的那一周** —— 即从历史起点开始，
+      每一次运行导出该证券的「第一周」。
+
 取周约束：**周结束（次周日 00:00 UTC）距今必须满 14 天**（避开仍在被订正/补录的数据）。
+显式指定的周若违反该约束 → **报错退出**（属调用方写错）；自动解析出的周若违反 → 该证券
+**跳过并记日志**（属「历史还没攒够两周」的正常状态，不是错误）。
 
 三、查询与分页
 ----------------------------------------------------------------------------------------
@@ -84,8 +91,9 @@ Region / Market **不在表里**，由同目录 SecuMetaMapping.jsonl 按 Code �
     SUPABASE_KEY           Supabase API 密钥（service-role；必填，不落日志）
     GIT_COMMIT_TOKEN       GitHub 令牌（提交 .mvsv 用；必填）
     SUPABASE_PAGE_SIZE     单页行数（默认 1000）
-    SECU_CODE              证券代码，多个以逗号分隔（如 IAU 或 IAU,GLD）
-    WEEK                   目标周 yyyyWW（可省；省则自动取「最近一个已满两周的周」）
+    SECU_CODE              证券代码，多个以逗号分隔（如 IAU 或 IAU,GLD）；
+                           **留空则取同目录 SecuMetaMapping.jsonl 中的全部 Code**
+    WEEK                   目标周 yyyyWW（可省；省则取该证券「最早一条记录」所在的周）
     CURR_BRANCH / GITHUB_REF_NAME   目标分支（默认 quote）
     SECU_META_MAPPING      映射表路径（默认同目录 SecuMetaMapping.jsonl）
 
@@ -94,20 +102,26 @@ Region / Market **不在表里**，由同目录 SecuMetaMapping.jsonl 按 Code �
 每个证券**独立处理**：各自一次查询、各自一份文件、各自一次提交；互不影响，单个失败不
 阻断后续证券。
 
-七、usc 取值探测（防静默产出空文件）
+七、usc 探测 = 取最早记录（一查两用）
 ----------------------------------------------------------------------------------------
 库里的 usc 若写成「裸码」（IAU）而不是「全码」，查询会返回 0 行 —— 而这与「该周真的没有
-数据」（如国庆长假）产出的**空文件外观完全一致，无法区分**。故在正式取数前先探测：
+数据」（如国庆长假）产出的**空文件外观完全一致，无法区分**。故在正式取数前先查该证券的
+最早一条记录：
 
-    GET /rest/v1/<表>?select=ts&usc=eq.<码>&limit=1
+    GET /rest/v1/<表>?select=ts&usc=eq.<码>&order=ts.asc&limit=1
 
-有行 ⇒ usc 取值可用，继续；0 行 ⇒ 判定为取值可疑，**该证券直接失败退出**，不产出任何文件。
+这一条查询**同时办两件事**：
+    1. 探测 —— 0 行 ⇒ 判定 usc 取值可疑，**该证券直接失败退出**，不产出任何文件；
+    2. 定周 —— 有行 ⇒ 取其 ts 所在的那一周作为「未显式指定 WEEK」时的目标周。
+
+查询语句会打进日志，故 usc 的真实取值形态从首次运行的日志即可读出。
 
 八、退出码
 ----------------------------------------------------------------------------------------
-    0 = 全部证券处理完毕（含「该周无数据」→ 产出仅含文件头的空文件，属预期状态）
-    1 = 致命错误（凭据缺失 / 分支未定 / 映射表缺失 / 周号非法）
-    2 = 部分证券失败（其余成功）
+    0 = 全部证券处理完毕（含「该周无数据」→ 产出仅含文件头的空文件；含「自动定周但历史
+        尚未攒够 14 天」→ 跳过，两者均属预期状态）
+    1 = 致命错误（凭据缺失 / 分支未定 / 映射表缺失）或全部证券失败
+    2 = 部分证券失败（其余成功或跳过）
 
 【环境要求】Python 3.8+，仅标准库；可直连 api.github.com 与 *.supabase.co。
 """
@@ -229,23 +243,23 @@ def parse_week_arg(text):
     return y, w
 
 
-def latest_eligible_week(now_utc):
-    """返回「已满两周」的最近一周的 (iso_year, iso_week)
+def week_of_earliest_record(client, usc):
+    """查该证券在库中最早一条记录（min(ts)），返回 (UTC 秒时间戳, 所属周)
 
-    判据：周结束（次周日 00:00 UTC）≤ now − 14 天。取满足该条件的**最晚**一周。
+    一条查询**同时办两件事**：既探测 usc 取值是否可用（0 行 ⇒ 取值可疑），
+    又为「未显式指定周」的场景定出目标周 —— 即该证券历史起点所在的那一周。
 
-    :param now_utc: 当前时刻（带时区）
-    :return: (iso_year, iso_week)
+    :param client: SupabaseRestClient
+    :param usc: 证券代码
+    :return: (earliest_ts, (iso_year, iso_week))；该 usc 无任何记录时返回 (None, None)
     """
-    t = now_utc.astimezone(datetime.timezone.utc) - \
-        datetime.timedelta(days=WEEK_END_LAG_DAYS)
-    # 不晚于 t 的最近一个「周终点」（周日 00:00 UTC）
-    offset = (t.weekday() + 1) % 7
-    week_end = (t - datetime.timedelta(days=offset)).replace(
-        hour=0, minute=0, second=0, microsecond=0)
-    week_start = week_end - datetime.timedelta(days=7)
-    y, w, _ = (week_start + datetime.timedelta(days=1)).isocalendar()
-    return y, w
+    qs = "select=ts&usc=eq.%s&order=ts.asc&limit=1" % urllib.parse.quote(usc, safe="")
+    rows = parse_rows(client.query(TABLE, qs, operation="查最早记录/探测 usc"))
+    if not rows:
+        return None, None
+    earliest_ts = int(rows[0]["ts"])
+    dt_utc = datetime.datetime.fromtimestamp(earliest_ts, tz=datetime.timezone.utc)
+    return earliest_ts, iso_label_of(dt_utc)
 
 
 # ---------------------------------------------------------------------------
@@ -414,16 +428,6 @@ def parse_rows(text):
     return data
 
 
-def probe_usc(client, usc):
-    """探测 usc 取值是否可用（见模块 docstring 第七节）
-
-    :return: True = 库中存在该 usc 的记录；False = 0 行（取值可疑）
-    """
-    qs = "select=ts&usc=eq.%s&limit=1" % urllib.parse.quote(usc, safe="")
-    rows = parse_rows(client.query(TABLE, qs, operation="usc 探测"))
-    return len(rows) > 0
-
-
 def fetch_week_rows(client, usc, start_ts, end_ts, page_size):
     """按 ts 升序、keyset 游标分页取全 [start_ts, end_ts) 区间内的记录
 
@@ -547,9 +551,8 @@ def resolve_config():
               os.environ.get("CURR_BRANCH", "") or os.environ.get("GITHUB_REF_NAME", "")).strip() \
         or DEFAULT_BRANCH
 
-    codes = [c.strip() for c in codes_raw.split(",") if c.strip()]
-    if not codes:
-        raise ImportError_("未指定证券代码（参数 SECU_CODE / argv[1]）")
+    # 留空 = 用映射表里的全部 Code（由 main 载入映射表后补齐）
+    codes = [c.strip() for c in codes_raw.split(",") if c.strip()] or None
 
     page_size_raw = os.environ.get("SUPABASE_PAGE_SIZE", "").strip()
     try:
@@ -570,17 +573,48 @@ def resolve_config():
     }
 
 
-def process_one(client, cfg, mapping, code, iso_year, iso_week, mapping_path):
-    """处理单个证券：探测 → 取数 → 生成 → 提交
+def process_one(client, cfg, mapping, code, mapping_path):
+    """处理单个证券：探测=取最早记录 →（定周）→ 取数 → 生成 → 提交
 
-    :return: (是否成功, 结果描述)
+    :return: ("ok"|"skipped"|"failed", 结果描述)
     """
     meta = mapping.get(code)
     if meta is None:
-        return False, "Code %s 在 %s 中无记录（拿不到 Region/Market）" % (code, mapping_path)
+        return "failed", "Code %s 在 %s 中无记录（拿不到 Region/Market）" % (code, mapping_path)
     region, market = meta
 
+    # 一次查询两用：探测 usc 取值是否可用 + 取该证券最早记录用于定周
+    earliest_ts, auto_label = week_of_earliest_record(client, code)
+    if earliest_ts is None:
+        return "failed", ("usc 探测 0 行（usc=eq.%s）—— 该取值在本表中无任何记录，"
+                          "疑为取值形态不符，**不产出任何文件**" % code)
+    print("[INFO] usc 探测通过：最早记录 ts=%d（%s UTC）"
+          % (earliest_ts, datetime.datetime.fromtimestamp(earliest_ts, tz=datetime.timezone.utc)
+             .strftime("%Y-%m-%d %H:%M:%S")))
+
+    if cfg["week_raw"]:
+        try:
+            iso_year, iso_week = parse_week_arg(cfg["week_raw"])
+        except ImportError_ as e:
+            return "failed", str(e)
+        print("[INFO] 目标周取自参数：%04dWW%02d" % (iso_year, iso_week))
+        auto_mode = False
+    else:
+        iso_year, iso_week = auto_label
+        print("[INFO] 未指定周 → 取该证券最早一条记录所在的周：%04dWW%02d" % (iso_year, iso_week))
+        auto_mode = True
+
+    # 「周结束距今满 14 天」：显式指定时违反 = 调用方写错（硬失败）；
+    # 自动解析时违反 = 历史还没攒够两周（正常状态，跳过）
     start, end = week_bounds_utc(iso_year, iso_week)
+    if end > datetime.datetime.now(datetime.timezone.utc) - \
+            datetime.timedelta(days=WEEK_END_LAG_DAYS):
+        msg = ("目标周 %04dWW%02d 的结束时刻 %s 距今不足 %d 天"
+               % (iso_year, iso_week, end.strftime("%Y-%m-%d %H:%M:%S"), WEEK_END_LAG_DAYS))
+        if auto_mode:
+            return "skipped", msg + "（历史尚未攒够，跳过）"
+        return "failed", msg + "，拒绝导出"
+
     start_ts = int(start.timestamp())
     end_ts = int(end.timestamp())
     path_key = build_target_path(region, market, code, iso_year, iso_week)
@@ -588,15 +622,9 @@ def process_one(client, cfg, mapping, code, iso_year, iso_week, mapping_path):
     print("[INFO] 证券 %s：Region=%s Market=%s" % (code, region, market))
     print("[INFO] 目标周 %04dWW%02d：UTC [%s, %s)  ts [%d, %d)"
           % (iso_year, iso_week,
-             start.strftime("%Y-%m-%d %H:%M:%S"),
-             end.strftime("%Y-%m-%d %H:%M:%S"), start_ts, end_ts))
+             start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"),
+             start_ts, end_ts))
     print("[INFO] 落点路径：%s" % path_key)
-
-    # 探测：把「usc 取值可疑」与「该周真无数据」分开（否则两者都产出空文件，无法区分）
-    if not probe_usc(client, code):
-        return False, ("usc 探测 0 行（usc=eq.%s）—— 该取值在本表中无任何记录，"
-                       "疑为取值形态不符，**不产出任何文件**" % code)
-    print("[INFO] usc 探测通过：库中存在 usc=eq.%s 的记录" % code)
 
     rows = fetch_week_rows(client, code, start_ts, end_ts, cfg["page_size"])
     if not rows:
@@ -620,12 +648,12 @@ def process_one(client, cfg, mapping, code, iso_year, iso_week, mapping_path):
         token=cfg["token"],
     )
     if not result.get("success"):
-        return False, "提交失败：%s" % result.get("message")
-    return True, "提交成功（HTTP %s，%s）" % (result.get("http_status"), path_key)
+        return "failed", "提交失败：%s" % result.get("message")
+    return "ok", "提交成功（HTTP %s，%s）" % (result.get("http_status"), path_key)
 
 
 def main():
-    """入口：解析配置 → 逐证券独立处理 → 汇总退出码"""
+    """入口：解析配置 → 载入映射表 → 逐证券独立处理 → 汇总退出码"""
     _ensure_console_utf8()
 
     try:
@@ -645,31 +673,18 @@ def main():
     mapping_path = os.environ.get("SECU_META_MAPPING", "").strip() \
         or os.path.join(script_dir, SECU_META_MAPPING_FILE)
 
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    try:
-        if cfg["week_raw"]:
-            iso_year, iso_week = parse_week_arg(cfg["week_raw"])
-            print("[INFO] 目标周取自参数：%04dWW%02d" % (iso_year, iso_week))
-        else:
-            iso_year, iso_week = latest_eligible_week(now_utc)
-            print("[INFO] 未指定周，自动取「最近一个已满 %d 天的周」：%04dWW%02d"
-                  % (WEEK_END_LAG_DAYS, iso_year, iso_week))
-    except ImportError_ as e:
-        print("❌ %s" % e)
-        return 1
-
-    # 复核「两周线」约束（显式指定的周也要过这一关）
-    start, end = week_bounds_utc(iso_year, iso_week)
-    if end > now_utc - datetime.timedelta(days=WEEK_END_LAG_DAYS):
-        print("❌ 目标周 %04dWW%02d 的结束时刻 %s 距今不足 %d 天，拒绝导出"
-              % (iso_year, iso_week, end.isoformat(), WEEK_END_LAG_DAYS))
-        return 1
-
     try:
         mapping = load_secu_meta_mapping(mapping_path)
     except ImportError_ as e:
         print("❌ %s" % e)
         return 1
+
+    # 未指定证券时取映射表中的全部 Code（保持文件内顺序，结果可复现）
+    codes = cfg["codes"] if cfg["codes"] else list(mapping.keys())
+    if cfg["codes"]:
+        print("[INFO] 待处理证券取自参数：%d 个" % len(codes))
+    else:
+        print("[INFO] 未指定证券 → 取映射表中的全部 Code：%d 个" % len(codes))
 
     try:
         client = SupabaseRestClient(cfg["project_ref"], cfg["api_key"])
@@ -677,28 +692,38 @@ def main():
         print("❌ %s" % e)
         return 1
 
-    print("[INFO] 目标分支 = %s | 待处理证券 %d 个：%s"
-          % (cfg["branch"], len(cfg["codes"]), ", ".join(cfg["codes"])))
+    print("[INFO] 目标分支 = %s" % cfg["branch"])
+    if cfg["week_raw"]:
+        print("[INFO] 目标周：%s（全部证券同一周）" % cfg["week_raw"])
+    else:
+        print("[INFO] 目标周：未指定 → 逐个证券取其「最早一条记录」所在的周")
 
-    ok, failed = [], []
-    for code in cfg["codes"]:
-        print("\n===== 证券 %s 开始 =====" % code)
+    ok, skipped, failed = [], [], []
+    for i, code in enumerate(codes, 1):
+        print("\n===== [%d/%d] 证券 %s 开始 =====" % (i, len(codes), code))
         try:
-            success, message = process_one(client, cfg, mapping, code,
-                                           iso_year, iso_week, mapping_path)
+            status, message = process_one(client, cfg, mapping, code, mapping_path)
         except ImportError_ as e:
-            success, message = False, str(e)
-        if success:
+            status, message = "failed", str(e)
+        if status == "ok":
             ok.append(code)
             print("✅ %s：%s" % (code, message))
+        elif status == "skipped":
+            skipped.append(code)
+            print("⏭️  %s：%s" % (code, message))
         else:
             failed.append(code)
             print("❌ %s：%s" % (code, message))
 
+    def fmt(lst):
+        return ", ".join(lst) if lst else "（无）"
+
     print("\n===== 汇总 =====")
-    print("成功 %d 个：%s" % (len(ok), ", ".join(ok) if ok else "（无）"))
-    print("失败 %d 个：%s" % (len(failed), ", ".join(failed) if failed else "（无）"))
-    if failed and ok:
+    print("成功 %d 个：%s" % (len(ok), fmt(ok)))
+    print("跳过 %d 个：%s" % (len(skipped), fmt(skipped)))
+    print("失败 %d 个：%s" % (len(failed), fmt(failed)))
+    # 跳过不算失败：属「历史尚未攒够两周」的正常状态
+    if failed and (ok or skipped):
         return 2
     if failed:
         return 1
