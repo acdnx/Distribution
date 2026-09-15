@@ -47,14 +47,14 @@ public.finv_quote_secu_kline_min 里「某个证券 + 某个整周」的分钟�
 
     **该表是本工具的唯一名单**（ACANX 2026-09-15：不再维护第二处）：运行开头一次性取回全表
     （按主键翻页，见第十二节），既作准入名单，也供落点路径的 `region` / `market`
-    （见第五节）与文件头的 `# Timezone`（见第四节）。
+    （见第五节）与文件头的 `# 时区` / `# Timezone`（见第四节）。
 
     - 取不到该 usc（**未登记**）  → 该证券**根本不在名单里**，不会被尝试；若源库存有数据，
       由第十二节的盘点逐只点名；
-    - 已登记但 `timezone` 为空     → 跳过（文件头必须有 Timezone 值）；
+    - 已登记但 `timezone` 为空     → 跳过（文件头必须有时区值）；
     - 登记表**全量查询本身失败**   → 名单无从确定，**整轮硬失败退出**（不再逐证券重试）。
 
-    前两种都**不产出文件** —— 宁可少导，也不能产出缺 Timezone 的半成品流向下游。
+    前两种都**不产出文件** —— 宁可少导，也不能产出缺时区的半成品流向下游。
 
     > 历史：名单原先由「`SecuMetaMapping.jsonl` 定尝试范围 + 本表定放行」两份人工清单共同
     > 决定，两处不同步会让上游在采的证券**静默缺席**（连一条「跳过」都没有）。现已收敛为
@@ -72,24 +72,38 @@ public.finv_quote_secu_kline_min 里「某个证券 + 某个整周」的分钟�
 23 行中英双段元信息头 + 1 空行 + 数据行（末行**无结尾换行**）：
 
     # 标题 / # 数据供应商 / # 字段 / # 字段名称 / # 字段类型 / # 计数 / # 采集时间 /
-    # 证券代码 / # 地区 / # 市场 / # Timezone / # 备注            （中文段 12 行）
+    # 证券代码 / # 地区 / # 市场 / # 时区 / # 备注                （中文段 12 行）
     # Title / # DataProvider / # Field / # FieldName / # FieldType / # Count /
     # FetchTime / # SecuCode / # Region / # Market / # Timezone  （英文段 11 行）
 
-`# Timezone` 取自在 `finv_quote_secu` 中登记的该证券的 `timezone` 列（IANA 名，如
-`Asia/Shanghai`），**两段写法相同**（ACANX 2026-09-15：键名 `# Timezone :`，插在 Market
-字段之后）。取不到就不导出 —— 见第三节的准入校验。
+中英两段的键名**各用各的语言**，与 证券代码/SecuCode、地区/Region、市场/Market 一致：
+中文段 `# 时区`，英文段 `# Timezone`（ACANX 2026-09-15：此前两段同为 `Timezone`，中文段
+改为 `时区`）。两段的**取值相同，写法也相同**（同样不加引号，理由见下方「引用约定」）。
+
+`# 时区` / `# Timezone` 取自在 `finv_quote_secu` 中登记的该证券的 `timezone` 列（IANA 名，
+如 `Asia/Shanghai`），插在 Market 字段之后。取不到就不导出 —— 见第三节的准入校验。
+
+**引用约定**：元信息取值只有在**含 `|` 或 `:`** 时才加双引号 —— 本头里被引的恰好就是
+`字段` / `字段名称` / `字段类型` / `采集时间` / `备注` 这一组（`字段` 系列含 `|`，时间戳与
+`备注` 含 `:`）。其余一概裸写：既有 Day 规范里 `# 标题 : IAU 分钟级行情数据` 连空格都不引，
+即是此例。`America/New_York` 既无 `|` 也无 `:`，故**不加引号**；裸写对下游也更稳 ——
+参考读取器的 `unquote()` 只剥成对的外层引号（裸值原样通过），而加了引号反而会让
+**不做 unquote 的朴素读取器**拿到带引号的串。
 
 数据行列序（与头部 # 字段 一致）：
 
-    Ts|Date|Time|Open|Close|Low|High|Volume|Turnover|ChangePrice|ChangePercent
+    Ts|Date|Time|Open|Close|Low|High|Volume|Turnover|ChangePrice|ChangeRatio
+
+字段名的拼写与源表列名对齐（`ChangePrice` ← `change_price`、`ChangeRatio` ←
+`change_ratio`）；末列在 2026-09-15 之前误写作 `ChangePercent`，值本身一直是
+`change_ratio` 列，此次仅**统一拼写**，数据行一个字节未动。
 
 注意 mvsv 的列序是 Open|Close|Low|High，与表定义 open|high|low|close **不一致**，不可照抄表序。
 
 数值格式（对本仓既有 Day 文件实测 11 份 / 7952 行推出，2026-09-15）：
     - 所有数值列一律**去尾随零、不限定小数位**；
       这是「不丢精度」要求下的唯一安全做法 —— 限定小数位必然引入舍入。
-      （既有文件里 ChangePercent 恒为 2 位，但那是上游的巧合，不是可依赖的规则）
+      （既有文件里 ChangeRatio 恒为 2 位，但那是上游的巧合，不是可依赖的规则）
     - 去尾零**不是**四舍五入，也不是截断：有效位一位不动，只是末尾的 0 不写；
       尾零去光后小数点也一起去掉（4539.000000 → 4539，不是 "4539."）。
     - Decimal.normalize() 会输出科学计数法（1E+1），故一律走 format(d, 'f')。
@@ -309,7 +323,7 @@ from GitHubCommitContent import (
 # Supabase / PostgREST 源表（与 Java 版 FinvQuoteSecuKlineMin 一致）
 TABLE = "finv_quote_secu_kline_min"
 
-# 证券元数据登记表（导出前的准入校验 + 文件头 Timezone 的取值来源，见 docstring 第三节）
+# 证券元数据登记表（导出前的准入校验 + 文件头时区的取值来源，见 docstring 第三节）
 SECU_TABLE = "finv_quote_secu"
 
 # SECU_TABLE 中与 finv_quote_secu_kline_min.usc 对应的列（ACANX 2026-09-15 给出建表 DDL 核实）
@@ -328,7 +342,7 @@ SELECT_COLUMNS = ("ts,date,time,open,close,low,high,volume,turnover,"
 
 # mvsv 数据列顺序（**与表定义列序不同**：mvsv 是 Open|Close|Low|High）
 MVSV_FIELDS = ("Ts|Date|Time|Open|Close|Low|High|Volume|Turnover|"
-               "ChangePrice|ChangePercent")
+               "ChangePrice|ChangeRatio")
 MVSV_FIELD_NAMES = ("时间戳(UTC)|日期|时间|开盘价|收盘价|最低价|最高价|成交量|"
                     "成交额|涨跌值|涨跌幅(%)")
 MVSV_FIELD_TYPES = ("int|int|int|Decimal|Decimal|Decimal|Decimal|Decimal|"
@@ -702,6 +716,9 @@ def fetch_registered_secus(client):
 
     keyset 游标按 `usc`（主键）升序翻页；登记表只有几十行，实际恒为一页。
 
+    未登记的证券**不予导出**（见 docstring 第三节）：文件头的 `# 时区` / `# Timezone` 取自此表，
+    取不到就产不出合格的文件，故宁可少导，也不产出缺值的半成品。
+
     :param client: SupabaseRestClient
     :return: (dict {usc: (region, market, timezone)}, error)
         - 成功       → ({...}, None)
@@ -952,7 +969,7 @@ def build_mvsv(rows, code, region, market, timezone, fetch_time_text):
         "# 证券代码 : %s" % code,
         "# 地区 : %s" % region,
         "# 市场 : %s" % market,
-        "# Timezone : %s" % timezone,
+        "# 时区 : %s" % timezone,
         "# 备注 :",
         "# Title : %s Minute Quote Data" % code,
         "# DataProvider : %s" % PROVIDER,
@@ -1034,8 +1051,12 @@ def pick_target_path(cfg, region, market, code, iso_year, iso_week):
         return None, None, "列举目标目录失败（%s）：%s" % (dir_path, err)
 
     if base_name not in names:
+        _log("[INFO] 同名探测：列举 %s/ → %d 个文件，无 %s → 用常规命名"
+             % (dir_path, len(names), base_name))
         return base, None, None
 
+    _log("[WARN] 同名探测：列举 %s/ → %d 个文件，发现同名 %s"
+         % (dir_path, len(names), base_name))
     _log("[WARN] 目标文件已存在：%s" % base)
     _log("[WARN]   → 按同名冲突规避，改用 _N 后缀（N 从 1 起，取第一个未占用的）")
     stem = base_name[:-len(".mvsv")]
@@ -1309,7 +1330,7 @@ def process_one(client, cfg, registry, code, target_week=None, stats=None):
                            % (SECU_TABLE, SECU_TABLE_CODE_COLUMN, code))
     region, market, timezone = meta
     if not timezone:
-        return "skipped", ("已在 %s 中登记，但其 timezone 为空 —— 文件头需要 Timezone 值，"
+        return "skipped", ("已在 %s 中登记，但其 timezone 为空 —— 文件头需要时区值，"
                            "故不予导出；补全 timezone 后重跑即可" % SECU_TABLE)
     _log("[INFO] 登记校验通过：Region=%s Market=%s timezone=%s" % (region, market, timezone))
 
