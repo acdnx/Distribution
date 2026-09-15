@@ -258,7 +258,7 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
 `INVENTORY_MAX_SECU` 兜住上游证券数暴增。登记表则不同 —— 它是名单本身，取不到即整轮退出
 （见第三节）。
 
-十三、每日批次：公平顺序、周屏障与配额（2026-09-15）
+十三、每日批次：周优先队列与配额（2026-09-15）
 ----------------------------------------------------------------------------------------
 目标（ACANX 2026-09-15 定）：**每天都有货交付**，而不是每周集中爆一次、其余六天闲置。
 
@@ -266,22 +266,22 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
 同一瞬间跨过 14 天线（第二节），所以「每天跑全量」并不会让数据更早到达，只是把爆发原样
 推迟到那一天。要每天有货，就得让队列活过整周。
 
-三条规则共同构成一个**无状态**的日调度（不引入任何新表、新文件、新状态字段）：
+两条规则构成一个**无状态**的日调度（不引入任何新表、新文件、新状态字段）：
 
-    ① 周屏障 —— 前一周全部导完，才碰下一周
-       对每只证券算「最早一个尚未产出的周」next(c)，取 W_now = min next(c)，本次只导
-       W_now。有证券没导完 W_now ⇒ 它的 next 还停在 W_now ⇒ min 不动 ⇒ 下次继续 W_now，
-       **不会跳周**；某证券该周无数据不影响 min（min 取小，且空周本身要产出空文件）。
+    ① 队列 —— 按周升序装下**所有**待导证券，每只导它自己「最早一个尚未产出的周」next(c)。
+       一轮**可以跨周**（ACANX 2026-09-15 定）：落单在早周的证券补完后，接着就取下一周，
+       直到当天导够配额。「最早周优先、不跳周」照旧成立（早周永远排在前面），但落单证券
+       **不再把整条队列按停** —— 从前它一掉回早周，当天就只导它一只，七成配额白白闲置。
 
-    ② 公平顺序 —— weekly_order()：首位按周序号轮转（每 N 周每只证券**恰好**当一次第一，
-       是硬保证而非概率收敛），其余按 sha256("<年>-<周>|<usc>") 排序。
+    ② 公平顺序 —— weekly_order()：**同一周内**，首位按周序号轮转（每 N 周每只证券**恰好**
+       当一次第一，是硬保证而非概率收敛），其余按 sha256("<年>-<周>|<usc>") 排序。
        **必须是确定性的**：用 random.random() 的话，手动重跑或任务重试会重新洗牌 ——
-       同一天两次运行导出两批不同证券，配额翻倍、跨天边界错乱。哈希排序保证同一周
-       永远同一个顺序。
+       同一天两次运行导出两批不同证券、配额翻倍。哈希排序保证同一周永远同一个顺序。
 
-    ③ 配额 —— DAILY_EXPORT_QUOTA（行数，见第八节）。按 ② 的顺序逐只导出，累计**实际
-       数据行数**达到配额即停，剩下的留到下次（它们的 next 仍是 W_now，屏障自动接上）。
-       证券是**原子单位**：不切半只，故最后一只可能小幅超出。空周文件计 0 行，不占配额。
+    ③ 配额 —— DAILY_EXPORT_QUOTA（行数，见第八节）。语义是**当天至少要导够的行数**，
+       不是上限（ACANX 2026-09-15 定）：按 ①② 的顺序逐只导出，累计**实际数据行数**没到
+       配额就不收工；队列里还有货就继续取，这时自然会跨到下一周。证券是**原子单位**：
+       不切半只、也不跳过大只去凑数，故最后一只可能超出配额。空周文件计 0 行，不占配额。
 
 **进度以目标仓库为准，不以源库是否删除为准。** 判据是「该证券该周的文件是否已在目标分支
 上」—— 导出的语义本就是「在目标仓库产生文件」，源库删不删只是防膨胀的实现细节。故本节
@@ -290,9 +290,11 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
 （`list_exported_weeks()`）。副产品是**幂等** —— 同一周不会被重复导出（ACANX：「证券 A 在
 周一已导出，周二~六没必要再重复导一遍」），重跑也安全。
 
-**配额的下界**：必须 ≥「每周新增行数 ÷ 7」。低于它则队列每天还不上，滞后无上限累积
-（W_now 会越来越落后于当前可导出周）。反过来要「每天有货」也不宜 ≥ 每周总量，否则一天
-就清空队列，剩下的六天依旧无事可做。
+**配额怎么定**：下界是「每周新增行数 ÷ 7」—— 低于它则队列每天还不上，滞后无上限累积
+（最早待导周会越来越落后于当前可导出周）。**等于**它时，每周新到的一周到第七天正好导完，
+七天每天都有货、也不会空转，这是「每天都有货交付」的稳态取值（实测每周约 5.3~5.7 万行
+⇒ 约 7600 行/天）。**高于**它则是在追历史积压（当前 WW25…WW35 共 11 周待补，配额 10132
+即属此列）；追平后若不回调，每周的第 6~7 天会无事可做。
 
 显式指定 `WEEK` 时走**手动路径**：全部证券同一周、**不受配额限制**（运维动作而非日常调度）；
 此时同名文件按第六节加 `_N` 后缀，允许重复导出，用于数据订正。
@@ -388,8 +390,10 @@ ENV_ENABLE_DELETE = "SUPABASE_ENABLE_DELETE"
 # 不必发 PR、也不必重新触发工作流；未设置时回落到下面的默认值。
 ENV_DAILY_QUOTA = "DAILY_EXPORT_QUOTA"
 
-# 配额缺省值：约「每周新增行数 ÷ 7」，使队列正好一周清空一轮（当前每周约 6.9 万行）。
-# 低于「每周新增 ÷ 7」会让队列每天还不上、滞后无上限累积 —— 见 docstring 第十三节。
+# 配额缺省值：语义是「当天至少要导够的行数」（下限，不是上限，见 docstring 第十三节③）。
+# ≈「每周新增行数 ÷ 7」（实测每周约 5.3~5.7 万行 ⇒ 约 7600 行/天），取 10000 略高于它：
+# 既保证每周新到的一周能铺满七天，又能小幅追一点历史积压。
+# 低于「每周新增 ÷ 7」会让队列每天还不上、滞后无上限累积。
 DEFAULT_DAILY_QUOTA = 10000
 
 # PostgREST 请求超时（秒）
@@ -1074,7 +1078,7 @@ def pick_target_path(cfg, region, market, code, iso_year, iso_week):
 
 
 # ---------------------------------------------------------------------------
-# 每日批次：公平顺序 + 周屏障 + 配额（见 docstring 第十三节）
+# 每日批次：周升序队列 + 公平顺序 + 配额（见 docstring 第十三节）
 # ---------------------------------------------------------------------------
 
 def export_name_re(region, market, code):
@@ -1199,15 +1203,19 @@ def pending_week(earliest_label, exported_weeks, max_label):
 
 
 def plan_daily_batch(client, cfg, registry, codes):
-    """定出本次批次的计划：导哪一周、按什么顺序、哪些证券待导（docstring 第十三节）
+    """定出本次批次的队列：导哪些证券、各自的周、按什么顺序（docstring 第十三节）
 
     每只证券各一次源库查询（复用 `week_of_earliest_record`，同时充当 usc 有效性探测）
     与一次目标仓库目录列举 —— N 只证券约 2N 次请求。
 
+    队列**装下所有**待导证券（不是只装最早那一周）：先按周升序，同一周内按 `weekly_order`
+    排。每只证券导**它自己**的最早未产出周 —— 故一轮里不同证券可能落在不同的周上，
+    这是「跨周」的正常形态（见 docstring 第十三节①）。
+
     :return: (plan, error)。plan 为 dict：
-        - week:    本次要导的周 (iso_year, iso_week)；无待导时为 None
-        - ordered: 该周的待导证券，已按 `weekly_order` 排好
-        - awaiting: 已领先于本次周、需等下一周的证券数
+        - queue:   [(code, (iso_year, iso_week)), ...]，已按周升序 + 周内公平顺序排好；
+                   无待导时为空列表
+        - weeks:   (最早周, 最晚周)；无待导时为 None
         - blocked: {code: 原因}，未进入队列的证券及原因
     """
     max_label = max_exportable_week()
@@ -1246,32 +1254,38 @@ def plan_daily_batch(client, cfg, registry, codes):
                 earliest_label[0], earliest_label[1]))
 
     if not pendings:
-        return {"week": None, "ordered": [], "awaiting": 0, "blocked": blocked}, None
+        return {"queue": [], "weeks": None, "blocked": blocked}, None
 
-    week = min(pendings.values())
-    ready = [c for c in pendings if pendings[c] == week]
-    ordered = weekly_order(ready, week[0], week[1])
-    awaiting = len(pendings) - len(ready)
+    # 队列：按周升序装下**所有**待导证券；同一周内走公平顺序。
+    # **不是**只装最早那一周 —— 见 docstring 第十三节①：落单在早周的证券不再把队列按停。
+    queue, spans = [], []
+    for week in sorted(set(pendings.values())):
+        ready = sorted(c for c in pendings if pendings[c] == week)
+        ordered = weekly_order(ready, week[0], week[1])
+        queue.extend((c, week) for c in ordered)
+        spans.append("%04dWW%02d×%d" % (week[0], week[1], len(ordered)))
 
-    _log("[INFO] 周屏障：本次目标周 = %04dWW%02d（待导 %d 只；另有 %d 只已领先，须等下一周）"
-         % (week[0], week[1], len(ordered), awaiting))
+    weeks = (min(pendings.values()), max(pendings.values()))
+    _log("[INFO] 队列：待导 %d 只，覆盖 %04dWW%02d ~ %04dWW%02d（按周升序；%s）"
+         % (len(queue), weeks[0][0], weeks[0][1], weeks[1][0], weeks[1][1],
+            "、".join(spans)))
+    _log("[INFO] 队列顺序（周升序 + 周内公平顺序，确定性）：%s%s"
+         % (", ".join(c for c, _ in queue[:12]), " …" if len(queue) > 12 else ""))
 
-    # 队列积压提示：屏障取 min，故任何一只证券的**历史缺口**都会把整条队列按在那一周。
+    # 队列积压提示：最早那一周若久未入库，说明队列还不上账。
     # 首次运行（或某只证券换了 Region/Market 落点、目标目录还是空的）必然如此，
     # 会按每日配额逐日补齐；但也有可能是配额小于「每周新增 ÷ 7」导致的还不上账。
-    _, week_end = week_bounds_utc(*week)
+    _, week_end = week_bounds_utc(*weeks[0])
     overdue = (datetime.datetime.now(datetime.timezone.utc) - week_end).days - WEEK_END_LAG_DAYS
     if overdue > 7:
-        _log("[WARN] 队列积压：目标周结束于 %s，超出入库线已 %d 天"
+        _log("[WARN] 队列积压：最早待导周结束于 %s，超出入库线已 %d 天"
              % (week_end.strftime("%Y-%m-%d"), overdue))
         _log("[WARN]   常见成因：① 首次运行 / 某只证券的目标目录还是空的（历史缺口要逐日补）；"
              "② 配额低于「每周新增行数 ÷ 7」，队列每天还不上账")
         _log("[WARN]   当前配额 %s —— 积压不再增长才对；若逐日变大，请调高 %s"
              % ("不限" if cfg["daily_quota"] <= 0 else "%d 行" % cfg["daily_quota"],
                 ENV_DAILY_QUOTA))
-    _log("[INFO] 公平顺序（首位轮转 + 其余按周哈希洗牌，确定性）：%s%s"
-         % (", ".join(ordered[:12]), " …" if len(ordered) > 12 else ""))
-    return {"week": week, "ordered": ordered, "awaiting": awaiting, "blocked": blocked}, None
+    return {"queue": queue, "weeks": weeks, "blocked": blocked}, None
 
 
 # ---------------------------------------------------------------------------
@@ -1355,7 +1369,8 @@ def process_one(client, cfg, registry, code, target_week=None, stats=None):
         auto_mode = False
     elif target_week is not None:
         iso_year, iso_week = target_week
-        _log("[INFO] 目标周取自批次计划（周屏障）：%04dWW%02d" % (iso_year, iso_week))
+        _log("[INFO] 目标周取自批次队列（该证券最早未产出的周）：%04dWW%02d"
+             % (iso_year, iso_week))
         auto_mode = False
     else:
         iso_year, iso_week = auto_label
@@ -1537,14 +1552,14 @@ def main():
 
     # 两条路径（docstring 第十三节）：
     #   手动 —— 显式指定 WEEK：运维动作，全部证券同一周，**不受每日配额限制**
-    #   日常 —— 周屏障定出目标周，按公平顺序导到配额为止
+    #   日常 —— 队列按周升序装下所有待导，导到「≥ 每日配额」才收工（可跨周）
     if cfg["week_raw"]:
         _log("[INFO] 目标周：%s（全部证券同一周；手动路径，**不受每日配额限制**）"
              % cfg["week_raw"])
         queue = [(code, None) for code in codes]
         quota = 0
     else:
-        _log("[INFO] 目标周：未指定 → 走每日批次（周屏障 + 公平顺序 + 配额）")
+        _log("[INFO] 目标周：未指定 → 走每日批次（周升序队列 + 公平顺序 + 配额）")
         plan, err = plan_daily_batch(client, cfg, registry, codes)
         if err:
             _log("❌ 批次计划失败：%s" % err)
@@ -1554,12 +1569,12 @@ def main():
             _log("[INFO] 未进入本次队列的 %d 只：" % len(plan["blocked"]))
             for code in sorted(plan["blocked"]):
                 _log("[INFO]   %s：%s" % (code, plan["blocked"][code]))
-        if plan["week"] is None:
+        if not plan["queue"]:
             _log("")
             _log("[INFO] 全部证券均已追平可导出周 —— 本次无待导数据"
                   "（正常：新的一周尚未跨过 %d 天线）" % WEEK_END_LAG_DAYS)
             return 0
-        queue = [(code, plan["week"]) for code in plan["ordered"]]
+        queue = plan["queue"]
         quota = cfg["daily_quota"]
 
     ok, skipped, failed, partial = [], [], [], []
@@ -1567,9 +1582,11 @@ def main():
     for i, (code, week) in enumerate(queue, 1):
         if quota > 0 and exported_rows >= quota:
             _log("")
+            code_next, week_next = queue[i - 1]
             _log("[INFO] 已达每日配额 %d 行（本批实际已导 %d 行）—— 就此收工；"
-                  "剩余 %d 只留待下次运行（屏障会自动接上同一周 %04dWW%02d）"
-                  % (quota, exported_rows, len(queue) - i + 1, week[0], week[1]))
+                  "剩余 %d 只留待下次运行（下次从 %04dWW%02d 的 %s 起接着导）"
+                  % (quota, exported_rows, len(queue) - i + 1,
+                     week_next[0], week_next[1], code_next))
             break
         _log("")
         _log("===== [%d/%d] 证券 %s 开始（本批已导 %d 行）====="
