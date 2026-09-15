@@ -1,3 +1,6 @@
+# 【已退役】2026-09-15 起，证券名单以 Supabase 登记表 finv_quote_secu 为唯一真源
+# （region / market / timezone 均在该表内），SupabaseImportWeekMvsv.py 不再读取本文件。
+# 保留仅为历史对照，请勿再新增或修改；待确认无其他消费方后整体删除。
 {"Region": "CN", "Market": "SH", "Code": "000001"}
 {"Region": "CN", "Market": "SH", "Code": "000510"}
 {"Region": "CN", "Market": "SH", "Code": "000985"}

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       code:
-        description: 证券代码（如 IAU；留空 = 取 SecuMetaMapping.jsonl 中的全部 Code）
+        description: 证券代码（如 IAU；留空 = 取 finv_quote_secu 登记表中的全部证券）
         type: string
         required: false
         default: ''
@@ -64,8 +64,8 @@ jobs:
           # 必填：Supabase 凭据（Data API 读 finv_quote_secu_kline_min 用）
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # 待导出证券：手动触发取输入（可逗号分隔多个）；留空则取脚本同目录
-          # SecuMetaMapping.jsonl 中的全部 Code。多个时**逐个独立处理**
+          # 待导出证券：手动触发取输入（可逗号分隔多个）；留空则取
+          # finv_quote_secu 登记表中的全部 usc。多个时**逐个独立处理**
           # （各自查询 / 各自一份文件 / 各自一次提交）
           SECU_CODE: ${{ inputs.code }}
           # 目标周：留空则由脚本取该证券「最早一条记录」所在的周
