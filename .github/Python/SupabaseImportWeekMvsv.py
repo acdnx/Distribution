@@ -38,10 +38,22 @@ public.finv_quote_secu_kline_min 里「某个证券 + 某个整周」的分钟�
 显式指定的周若违反该约束 → **报错退出**（属调用方写错）；自动解析出的周若违反 → 该证券
 **跳过并记日志**（属「历史还没攒够两周」的正常状态，不是错误）。
 
-三、查询与分页
+三、准入校验、查询与分页
 ----------------------------------------------------------------------------------------
-Supabase Data API（PostgREST）默认一次最多回 1000 行，而 7×24 品种一周有 10080 分钟，
-故必须分页。采用 **keyset（游标）分页**：按 ts 升序，每页取 limit 行，下一页把
+【准入校验】只有**在 `finv_quote_secu` 中登记过**的证券才允许导出（ACANX 2026-09-15）：
+
+    `finv_quote_secu` 是证券元数据登记表（主键 `usc`；`region` / `market` / `dt_create` /
+    `dt_update` 非空，`timezone` 可空），其 `usc` 与 `finv_quote_secu_kline_min.usc` 同值；
+    导出前按 `usc` 查一次，取其 `timezone` 列写进文件头的 `# Timezone`（见第四节）。
+
+    - 查不到该 usc（**未登记**）  → 跳过该证券，日志说明缘由于此；
+    - 已登记但 `timezone` 为空     → 同样跳过（文件头必须有 Timezone 值）；
+    - 查询本身失败（网络/权限）    → 记 failed。
+
+    三种情况都**不产出文件** —— 宁可少导，也不能产出缺 Timezone 的半成品流向下游。
+
+【分页】Supabase Data API（PostgREST）默认一次最多回 1000 行，而 7×24 品种一周有 10080
+分钟，故必须分页。采用 **keyset（游标）分页**：按 ts 升序，每页取 limit 行，下一页把
 `ts=gte.<周起点>` 换成 `ts=gt.<上一页最后一行的 ts>`，直到某页不足 limit 行为止。
 
 选 keyset 而非 offset 的理由：主键就是 (usc, ts)，同一 usc 下 ts 不会重复 ⇒ 游标严格单调，
@@ -49,12 +61,16 @@ Supabase Data API（PostgREST）默认一次最多回 1000 行，而 7×24 品�
 
 四、输出文件规范（.mvsv）
 ----------------------------------------------------------------------------------------
-21 行中英双段元信息头 + 1 空行 + 数据行（末行**无结尾换行**）：
+23 行中英双段元信息头 + 1 空行 + 数据行（末行**无结尾换行**）：
 
     # 标题 / # 数据供应商 / # 字段 / # 字段名称 / # 字段类型 / # 计数 / # 采集时间 /
-    # 证券代码 / # 地区 / # 市场 / # 备注                        （中文段 11 行）
+    # 证券代码 / # 地区 / # 市场 / # Timezone / # 备注            （中文段 12 行）
     # Title / # DataProvider / # Field / # FieldName / # FieldType / # Count /
-    # FetchTime / # SecuCode / # Region / # Market               （英文段 10 行）
+    # FetchTime / # SecuCode / # Region / # Market / # Timezone  （英文段 11 行）
+
+`# Timezone` 取自在 `finv_quote_secu` 中登记的该证券的 `timezone` 列（IANA 名，如
+`Asia/Shanghai`），**两段写法相同**（ACANX 2026-09-15：键名 `# Timezone :`，插在 Market
+字段之后）。取不到就不导出 —— 见第三节的准入校验。
 
 数据行列序（与头部 # 字段 一致）：
 
@@ -176,8 +192,10 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
 
 十一、退出码
 ----------------------------------------------------------------------------------------
-    0 = 全部证券处理完毕（含「该周无数据」→ 产出仅含文件头的空文件；含「自动定周但历史
-        尚未攒够 14 天」→ 跳过，两者均属预期状态）
+    0 = 全部证券处理完毕。以下几种都算「预期状态」，计入跳过、不影响退出码：
+        「该周无数据」→ 产出仅含文件头的空文件（不算跳过）；
+        「自动定周但历史尚未攒够 14 天」→ 跳过；
+        「未在 finv_quote_secu 登记 / 其 timezone 为空」→ 跳过（补全元数据后重跑即可）。
     1 = 致命错误（凭据缺失 / 分支未定 / 映射表缺失）或全部证券失败
     2 = 部分证券失败，或有证券「已导出但源库未删净」（partial）
 
@@ -207,6 +225,12 @@ from GitHubCommitContent import (
 
 # Supabase / PostgREST 源表（与 Java 版 FinvQuoteSecuKlineMin 一致）
 TABLE = "finv_quote_secu_kline_min"
+
+# 证券元数据登记表（导出前的准入校验 + 文件头 Timezone 的取值来源，见 docstring 第三节）
+SECU_TABLE = "finv_quote_secu"
+
+# SECU_TABLE 中与 finv_quote_secu_kline_min.usc 对应的列（ACANX 2026-09-15 给出建表 DDL 核实）
+SECU_TABLE_CODE_COLUMN = "usc"
 
 # 查询列（**按表列名**，与 mvsv 的列序无关）。prev_close / paocd 不取 —— mvsv 字段列表里没有。
 SELECT_COLUMNS = ("ts,date,time,open,close,low,high,volume,turnover,"
@@ -610,6 +634,33 @@ def parse_rows(text):
     return data
 
 
+def fetch_secu_timezone(client, code):
+    """查证券元数据登记表 `finv_quote_secu`，取该证券的 timezone（兼作导出准入校验）
+
+    未登记的证券**不予导出**（见 docstring 第三节）：文件头的 `# Timezone` 取自此表，
+    取不到就产不出合格的文件，故宁可少导，也不产出缺值的半成品。
+
+    :param client: SupabaseRestClient
+    :param code: 证券代码（裸码，如 IAU）
+    :return: (timezone, registered, error)：
+        - 未登记            → (None, False, None)
+        - 已登记但值为空    → (None, True, None)
+        - 已登记且值非空    → ("Asia/Shanghai", True, None)
+        - 查询失败          → (None, False, "失败原因")
+    """
+    qs = ("select=timezone&%s=eq.%s&limit=1"
+          % (SECU_TABLE_CODE_COLUMN, urllib.parse.quote(code, safe="")))
+    try:
+        rows = parse_rows(client.query(SECU_TABLE, qs,
+                                       operation="查 %s 的登记信息" % code))
+    except ImportError_ as e:
+        return None, False, str(e)
+    if not rows:
+        return None, False, None
+    timezone = (rows[0].get("timezone") or "").strip()
+    return (timezone or None), True, None
+
+
 def fetch_week_rows(client, usc, start_ts, end_ts, page_size):
     """按 ts 升序、keyset 游标分页取全 [start_ts, end_ts) 区间内的记录
 
@@ -703,13 +754,14 @@ def row_text(row):
     return "|".join(cells)
 
 
-def build_mvsv(rows, code, region, market, fetch_time_text):
-    """生成完整的 .mvsv 文本（21 行头 + 空行 + 数据行，末行无结尾换行）
+def build_mvsv(rows, code, region, market, timezone, fetch_time_text):
+    """生成完整的 .mvsv 文本（23 行头 + 空行 + 数据行，末行无结尾换行）
 
     :param rows: 行数组（可能为空 = 该周无数据，仍产出仅含文件头的文件）
     :param code: 证券代码（裸码，如 IAU）
     :param region: 地区（如 US）
     :param market: 市场（如 ARCA）
+    :param timezone: 时区（如 Asia/Shanghai），取自 finv_quote_secu.timezone
     :param fetch_time_text: 采集时间文本（导出时刻，UTC+8）
     :return: 文件文本
     """
@@ -725,6 +777,7 @@ def build_mvsv(rows, code, region, market, fetch_time_text):
         "# 证券代码 : %s" % code,
         "# 地区 : %s" % region,
         "# 市场 : %s" % market,
+        "# Timezone : %s" % timezone,
         "# 备注 :",
         "# Title : %s Minute Quote Data" % code,
         "# DataProvider : %s" % PROVIDER,
@@ -736,6 +789,7 @@ def build_mvsv(rows, code, region, market, fetch_time_text):
         "# SecuCode : %s" % code,
         "# Region : %s" % region,
         "# Market : %s" % market,
+        "# Timezone : %s" % timezone,
         "",
     ]
     lines.extend(row_text(r) for r in rows)
@@ -861,14 +915,28 @@ def resolve_config():
 
 
 def process_one(client, cfg, mapping, code, mapping_path):
-    """处理单个证券：探测=取最早记录 →（定周）→ 取数 → 生成 → 提交
+    """处理单个证券：登记校验 → 探测=取最早记录 →（定周）→ 取数 → 生成 → 提交
 
-    :return: ("ok"|"skipped"|"failed", 结果描述)
+    :return: ("ok"|"skipped"|"failed"|"partial", 结果描述)
     """
     meta = mapping.get(code)
     if meta is None:
         return "failed", "Code %s 在 %s 中无记录（拿不到 Region/Market）" % (code, mapping_path)
     region, market = meta
+
+    # 准入校验：未在 finv_quote_secu 登记（或 timezone 为空）的证券不予导出
+    # —— 文件头的 # Timezone 取自此表，取不到就产不出合格文件（docstring 第三节）
+    timezone, registered, err = fetch_secu_timezone(client, code)
+    if err:
+        return "failed", "查 %s 登记信息失败：%s" % (SECU_TABLE, err)
+    if not registered:
+        return "skipped", ("未在 %s 中登记（%s=eq.%s 查无此行）—— 按约定不予导出；"
+                           "补全该证券的元数据后重跑即可"
+                           % (SECU_TABLE, SECU_TABLE_CODE_COLUMN, code))
+    if not timezone:
+        return "skipped", ("已在 %s 中登记，但其 timezone 为空 —— 文件头需要 Timezone 值，"
+                           "故不予导出；补全 timezone 后重跑即可" % SECU_TABLE)
+    _log("[INFO] 登记校验通过：timezone = %s" % timezone)
 
     # 一次查询两用：探测 usc 取值是否可用 + 取该证券最早记录用于定周
     earliest_ts, auto_label = week_of_earliest_record(client, code)
@@ -927,7 +995,7 @@ def process_one(client, cfg, mapping, code, mapping_path):
               % (len(rows), rows[0].get("ts"), rows[-1].get("ts")))
 
     now_local = datetime.datetime.now().astimezone()
-    text = build_mvsv(rows, code, region, market,
+    text = build_mvsv(rows, code, region, market, timezone,
                       now_local.strftime("%Y-%m-%d %H:%M:%S"))
     _log("[INFO] .mvsv 生成完毕：%d 行头/数据，%d 字节（UTF-8）"
           % (text.count("\n") + 1, len(text.encode("utf-8"))))
