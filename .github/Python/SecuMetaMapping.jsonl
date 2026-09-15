@@ -1,0 +1,35 @@
+# 【已退役】2026-09-15 起，证券名单以 Supabase 登记表 finv_quote_secu 为唯一真源
+# （region / market / timezone 均在该表内），SupabaseImportWeekMvsv.py 不再读取本文件。
+# 保留仅为历史对照，请勿再新增或修改；待确认无其他消费方后整体删除。
+#
+# 已知差异（**以下方登记表取值 000001 = CN/SZ 为准**，ACANX 2026-09-15 裁定：
+# 该码实际就是深市的平安银行，上证综指后续会另用单独的代码，不再占用这个有冲突的码）：
+{"Region": "CN", "Market": "SH", "Code": "000001"}
+{"Region": "CN", "Market": "SH", "Code": "000510"}
+{"Region": "CN", "Market": "SH", "Code": "000985"}
+{"Region": "CN", "Market": "SZ", "Code": "159562"}
+{"Region": "CN", "Market": "SZ", "Code": "159934"}
+{"Region": "CN", "Market": "SZ", "Code": "159937"}
+{"Region": "CN", "Market": "SZ", "Code": "160719"}
+{"Region": "CN", "Market": "SZ", "Code": "161116"}
+{"Region": "CN", "Market": "SZ", "Code": "399006"}
+{"Region": "CN", "Market": "SH", "Code": "517400"}
+{"Region": "CN", "Market": "SH", "Code": "517520"}
+{"Region": "CN", "Market": "SH", "Code": "518880"}
+{"Region": "CN", "Market": "SH", "Code": "600570"}
+{"Region": "CN", "Market": "SH", "Code": "688050"}
+{"Region": "HK", "Market": "HK", "Code": "01810"}
+{"Region": "HK", "Market": "HK", "Code": "09999"}
+{"Region": "HK", "Market": "HK", "Code": "HSI"}
+{"Region": "HK", "Market": "HK", "Code": "HSIII"}
+{"Region": "HK", "Market": "HK", "Code": "HTI"}
+{"Region": "US", "Market": "NASDAQ", "Code": "NVDA"}
+{"Region": "US", "Market": "ARCA", "Code": "GDX"}
+{"Region": "US", "Market": "ARCA", "Code": "GLD"}
+{"Region": "US", "Market": "ARCA", "Code": "IAU"}
+{"Region": "US", "Market": "NASDAQ", "Code": "SPCX"}
+{"Region": "US", "Market": "COMEX", "Code": "GCMain"}
+{"Region": "CC", "Market": "FTC", "Code": "PAXG"}
+{"Region": "FX", "Market": "CFD", "Code": "XAUUSD"}
+{"Region": "FX", "Market": "CER", "Code": "USDCNY"}
+

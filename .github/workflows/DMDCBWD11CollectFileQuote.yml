@@ -1,0 +1,35 @@
+name: DMDCBWD11CollectFileQuote
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 选择要执行工作流的分支（需包含 .github/Python/DMDCBWD11CollectFile.py 及同目录依赖模块）
+        type: string
+        required: false
+        default: quote
+
+concurrency:
+  group: DMDCBWD11-collect
+  cancel-in-progress: false
+
+jobs:
+  DMDCBWD11CollectFile:
+    runs-on: ubuntu-latest
+    steps:
+      # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 quote
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || 'quote' }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: RunDMDCBWD11CollectFile
+        env:
+          # 必填：GitHub 写仓库令牌（提交 UploadFileList 清单到 BranchMigration 用）
+          GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
+        run: python3 .github/Python/DMDCBWD11CollectFile.py
