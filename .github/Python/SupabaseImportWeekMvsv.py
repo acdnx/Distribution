@@ -43,14 +43,22 @@ public.finv_quote_secu_kline_min 里「某个证券 + 某个整周」的分钟�
 【准入校验】只有**在 `finv_quote_secu` 中登记过**的证券才允许导出（ACANX 2026-09-15）：
 
     `finv_quote_secu` 是证券元数据登记表（主键 `usc`；`region` / `market` / `dt_create` /
-    `dt_update` 非空，`timezone` 可空），其 `usc` 与 `finv_quote_secu_kline_min.usc` 同值；
-    导出前按 `usc` 查一次，取其 `timezone` 列写进文件头的 `# 时区` / `# Timezone`（见第四节）。
+    `dt_update` 非空，`timezone` 可空），其 `usc` 与 `finv_quote_secu_kline_min.usc` 同值。
 
-    - 查不到该 usc（**未登记**）  → 跳过该证券，日志说明缘由于此；
-    - 已登记但 `timezone` 为空     → 同样跳过（文件头必须有时区值）；
-    - 查询本身失败（网络/权限）    → 记 failed。
+    **该表是本工具的唯一名单**（ACANX 2026-09-15：不再维护第二处）：运行开头一次性取回全表
+    （按主键翻页，见第十二节），既作准入名单，也供落点路径的 `region` / `market`
+    （见第五节）与文件头的 `# 时区` / `# Timezone`（见第四节）。
 
-    三种情况都**不产出文件** —— 宁可少导，也不能产出缺时区的半成品流向下游。
+    - 取不到该 usc（**未登记**）  → 该证券**根本不在名单里**，不会被尝试；若源库存有数据，
+      由第十二节的盘点逐只点名；
+    - 已登记但 `timezone` 为空     → 跳过（文件头必须有时区值）；
+    - 登记表**全量查询本身失败**   → 名单无从确定，**整轮硬失败退出**（不再逐证券重试）。
+
+    前两种都**不产出文件** —— 宁可少导，也不能产出缺时区的半成品流向下游。
+
+    > 历史：名单原先由「`SecuMetaMapping.jsonl` 定尝试范围 + 本表定放行」两份人工清单共同
+    > 决定，两处不同步会让上游在采的证券**静默缺席**（连一条「跳过」都没有）。现已收敛为
+    > 本表一处，`SecuMetaMapping.jsonl` 退役（保留在仓库内仅作历史对照，代码不再读取）。
 
 【分页】Supabase Data API（PostgREST）默认一次最多回 1000 行，而 7×24 品种一周有 10080
 分钟，故必须分页。采用 **keyset（游标）分页**：按 ts 升序，每页取 limit 行，下一页把
@@ -114,7 +122,7 @@ public.finv_quote_secu_kline_min 里「某个证券 + 某个整周」的分钟�
 唯一差异是频率段与日期段（_Min_FT_yyyyMMdd ↔ _MIN_FT_yyyyWW）：_FT_ 段的位置、大小写
 与既有 Day 文件完全一致，只有频率标记（Min/MIN）和周/日粒度不同。
 
-Region / Market **不在表里**，由同目录 SecuMetaMapping.jsonl 按 Code 查得。
+Region / Market 取自登记表 `finv_quote_secu` 的 `region` / `market` 两列（见第三节）。
 
 六、同名冲突规避
 ----------------------------------------------------------------------------------------
@@ -165,10 +173,9 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
     SUPABASE_PAGE_SIZE     单页行数（默认 1000）
     SUPABASE_ENABLE_DELETE 删除源库开关（默认关；见第七节）
     SECU_CODE              证券代码，多个以逗号分隔（如 IAU 或 IAU,GLD）；
-                           **留空则取同目录 SecuMetaMapping.jsonl 中的全部 Code**
+                           **留空则取 `finv_quote_secu` 登记表中的全部 usc**
     WEEK                   目标周 yyyyWW（可省；省则取该证券「最早一条记录」所在的周）
     CURR_BRANCH / GITHUB_REF_NAME   目标分支（默认 quote）
-    SECU_META_MAPPING      映射表路径（默认同目录 SecuMetaMapping.jsonl）
 
 命令行参数优先于同名环境变量：argv[1]=SECU_CODE，argv[2]=WEEK，argv[3]=CURR_BRANCH。
 
@@ -210,15 +217,91 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
         「该周无数据」→ 产出仅含文件头的空文件（不算跳过）；
         「自动定周但历史尚未攒够 14 天」→ 跳过；
         「未在 finv_quote_secu 登记 / 其 timezone 为空」→ 跳过（补全元数据后重跑即可）。
-    1 = 致命错误（凭据缺失 / 分支未定 / 映射表缺失）或全部证券失败
+    1 = 致命错误（凭据缺失 / 分支未定 / 登记表取不回）或全部证券失败
     2 = 部分证券失败，或有证券「已导出但源库未删净」（partial）
+
+十二、存量盘点：源库里到底有哪些证券（2026-09-15）
+----------------------------------------------------------------------------------------
+本工具的导出名单是**人工维护**的（`finv_quote_secu` 的登记行），而上游的采集名单在库里 ——
+两者之间**没有任何同步机制**。上游新采的证券不会自动出现在本工具的名单里，只会每周无声地
+缺席：既不在名单里，日志连一条「跳过」都不会有（根本没被尝试）。
+
+> 收敛之前名单分两处（`SecuMetaMapping.jsonl` 定尝试范围 + 本表定放行），两处不同步时
+> 症状与此相同且更难查 —— 这正是收敛成一处（第三节）的直接动因。
+
+故每次运行**开头**盘点一次源库，把两份名单做差后打进日志：
+
+    ① 源库 `finv_quote_secu_kline_min`  上游**实际在采**什么 —— 扫描得到，是实测清单
+    ② 登记表 `finv_quote_secu`          唯一名单：既定准入（见第三节），也供 Region/Market
+                                        与 timezone（见第五节、第四节）
+
+逐只打印 ① 的每个证券及其登记状态，再就三类问题单独点名：
+
+    ！源库有数据、但 finv_quote_secu 未登记 —— **当前要补的就是这批**（附各自最早记录时刻）
+    ！已登记但 timezone 为空                —— 补一列即可放行
+    ！已登记但源库无数据                     —— 要么上游没采，要么 Code 形态不符，值得看一眼
+
+**为什么要逐跳而不是一条 SQL**：PostgREST 没有 `DISTINCT` / `GROUP BY`，一条查询取不回去重
+清单。故用 keyset 逐跳 —— `order=usc.asc,ts.asc` + `limit=1` + `usc=gt.<上一个>`，每次都走
+主键索引 (usc, ts) 取「下一个更大的 usc」及其最早一条记录，跳 N 次得 N 个证券：
+
+    GET /rest/v1/finv_quote_secu_kline_min?select=usc,ts&order=usc.asc,ts.asc&limit=1
+    GET /rest/v1/finv_quote_secu_kline_min?select=usc,ts&order=usc.asc,ts.asc&limit=1&usc=gt.<上一个>
+
+代价是 **N+1 次请求**（每次只回 1 行；N 是证券数，不是行数）。证券数上到几百以后，可在库侧
+建 `DISTINCT` 视图或 RPC 收成一次请求 —— 那属于库侧改动，不是本脚本能单方面决定的。
+
+源库清单**扫不动不阻断导出**：只记一条告警（结论只覆盖已扫到的部分），主流程照常；
+`INVENTORY_MAX_SECU` 兜住上游证券数暴增。登记表则不同 —— 它是名单本身，取不到即整轮退出
+（见第三节）。
+
+十三、每日批次：公平顺序、周屏障与配额（2026-09-15）
+----------------------------------------------------------------------------------------
+目标（ACANX 2026-09-15 定）：**每天都有货交付**，而不是每周集中爆一次、其余六天闲置。
+
+先说清一件事：稳态下这只能靠**有意保留一个已合格但未导出的队列**实现。所有证券的周都在
+同一瞬间跨过 14 天线（第二节），所以「每天跑全量」并不会让数据更早到达，只是把爆发原样
+推迟到那一天。要每天有货，就得让队列活过整周。
+
+三条规则共同构成一个**无状态**的日调度（不引入任何新表、新文件、新状态字段）：
+
+    ① 周屏障 —— 前一周全部导完，才碰下一周
+       对每只证券算「最早一个尚未产出的周」next(c)，取 W_now = min next(c)，本次只导
+       W_now。有证券没导完 W_now ⇒ 它的 next 还停在 W_now ⇒ min 不动 ⇒ 下次继续 W_now，
+       **不会跳周**；某证券该周无数据不影响 min（min 取小，且空周本身要产出空文件）。
+
+    ② 公平顺序 —— weekly_order()：首位按周序号轮转（每 N 周每只证券**恰好**当一次第一，
+       是硬保证而非概率收敛），其余按 sha256("<年>-<周>|<usc>") 排序。
+       **必须是确定性的**：用 random.random() 的话，手动重跑或任务重试会重新洗牌 ——
+       同一天两次运行导出两批不同证券，配额翻倍、跨天边界错乱。哈希排序保证同一周
+       永远同一个顺序。
+
+    ③ 配额 —— DAILY_EXPORT_QUOTA（行数，见第八节）。按 ② 的顺序逐只导出，累计**实际
+       数据行数**达到配额即停，剩下的留到下次（它们的 next 仍是 W_now，屏障自动接上）。
+       证券是**原子单位**：不切半只，故最后一只可能小幅超出。空周文件计 0 行，不占配额。
+
+**进度以目标仓库为准，不以源库是否删除为准。** 判据是「该证券该周的文件是否已在目标分支
+上」—— 导出的语义本就是「在目标仓库产生文件」，源库删不删只是防膨胀的实现细节。故本节
+**不依赖第七节的删除开关**：ACANX 2026-09-15 定「暂不删源库，等稳定后再开启」，而源库不删
+时 `week_of_earliest_record()` 永远返回历史第一周，进度就只能由目标仓库的已产出集合推进
+（`list_exported_weeks()`）。副产品是**幂等** —— 同一周不会被重复导出（ACANX：「证券 A 在
+周一已导出，周二~六没必要再重复导一遍」），重跑也安全。
+
+**配额的下界**：必须 ≥「每周新增行数 ÷ 7」。低于它则队列每天还不上，滞后无上限累积
+（W_now 会越来越落后于当前可导出周）。反过来要「每天有货」也不宜 ≥ 每周总量，否则一天
+就清空队列，剩下的六天依旧无事可做。
+
+显式指定 `WEEK` 时走**手动路径**：全部证券同一周、**不受配额限制**（运维动作而非日常调度）；
+此时同名文件按第六节加 `_N` 后缀，允许重复导出，用于数据订正。
 
 【环境要求】Python 3.8+，仅标准库；可直连 api.github.com 与 *.supabase.co。
 """
 
 import datetime
+import hashlib
 import json
 import os
+import re
 import sys
 import urllib.parse
 from decimal import Decimal
@@ -246,6 +329,13 @@ SECU_TABLE = "finv_quote_secu"
 # SECU_TABLE 中与 finv_quote_secu_kline_min.usc 对应的列（ACANX 2026-09-15 给出建表 DDL 核实）
 SECU_TABLE_CODE_COLUMN = "usc"
 
+# 存量盘点（见 docstring 第十二节）一次取回登记表的列。按 ACANX 2026-09-15 给出的建表 DDL，
+# region / market 与 timezone **同在** finv_quote_secu 一张表里。
+SECU_TABLE_COLUMNS = "usc,region,market,timezone"
+
+# 盘点源库时逐跳遍历 usc 的上限（每跳一次请求）。防上游证券数暴增时拖垮一次运行。
+INVENTORY_MAX_SECU = 500
+
 # 查询列（**按表列名**，与 mvsv 的列序无关）。prev_close / paocd 不取 —— mvsv 字段列表里没有。
 SELECT_COLUMNS = ("ts,date,time,open,close,low,high,volume,turnover,"
                   "change_price,change_ratio")
@@ -261,13 +351,22 @@ MVSV_FIELD_TYPES = ("int|int|int|Decimal|Decimal|Decimal|Decimal|Decimal|"
 # 供应商标识（本需求固定 FT）
 PROVIDER = "FT"
 
+# 落点目录模板（见模块 docstring 第五节）：<Region>_<Market>/<Code>
+# 文件名模板拼接其上，故二者的 `%` 参数按同一顺序连续消费：
+#     (region, market, code, region, market, code, iso_year, iso_week)
+TARGET_DIR_TEMPLATE = "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s"
+
 # 落点路径模板（见模块 docstring 第五节）
-TARGET_PATH_TEMPLATE = "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s/%s_%s_%s_MIN_FT_%04d%02d.mvsv"
+TARGET_PATH_TEMPLATE = TARGET_DIR_TEMPLATE + "/%s_%s_%s_MIN_FT_%04d%02d.mvsv"
 
 # 同名冲突规避：目标文件已存在时改用 _N 后缀（见 docstring 第六节）
 TARGET_PATH_CONFLICT_TEMPLATE = \
-    "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s/%s_%s_%s_MIN_FT_%04d%02d_%d.mvsv"
+    TARGET_DIR_TEMPLATE + "/%s_%s_%s_MIN_FT_%04d%02d_%d.mvsv"
 CONFLICT_SUFFIX_MAX = 99
+
+# 文件名反解用的正则**模板**：<Region>_<Market>_<Code>_MIN_FT_<yyyy><WW>[_N].mvsv
+# 周号**零填充两位**（%04d%02d），故 `202605` 不会误配 `202650`（见 docstring 第十三节）
+EXPORT_NAME_RE_TEMPLATE = r"^%s_%s_%s_MIN_FT_(\d{4})(\d{2})(?:_\d+)?\.mvsv$"
 
 # 周结束距今至少需要的天数（见 docstring 第二节）
 WEEK_END_LAG_DAYS = 14
@@ -276,12 +375,19 @@ WEEK_END_LAG_DAYS = 14
 DEFAULT_BRANCH = "quote"
 DEFAULT_PAGE_SIZE = 1000
 
-# 映射表（与脚本同目录）
-SECU_META_MAPPING_FILE = "SecuMetaMapping.jsonl"
-
 # 删除源库数据的安全开关（见 docstring 第七节）。**默认关**：关时只打印「待删除」清单，
 # 一个字节都不动库。开关名与语义对齐姊妹仓库 ACANX/Distribution 的 SupabaseSyncMvsv.py。
 ENV_ENABLE_DELETE = "SUPABASE_ENABLE_DELETE"
+
+# 每日导出配额（单位：**数据行数**，见 docstring 第十三节）。
+# 取值来源刻意**不放在 workflow_dispatch 界面里**：由仓库变量 DAILY_EXPORT_QUOTA
+# （Settings → Secrets and variables → Actions → Variables）注入，改它不必改本文件、
+# 不必发 PR、也不必重新触发工作流；未设置时回落到下面的默认值。
+ENV_DAILY_QUOTA = "DAILY_EXPORT_QUOTA"
+
+# 配额缺省值：约「每周新增行数 ÷ 7」，使队列正好一周清空一轮（当前每周约 6.9 万行）。
+# 低于「每周新增 ÷ 7」会让队列每天还不上、滞后无上限累积 —— 见 docstring 第十三节。
+DEFAULT_DAILY_QUOTA = 10000
 
 # PostgREST 请求超时（秒）
 HTTP_TIMEOUT = 60
@@ -509,49 +615,6 @@ def derive_date_time(ts):
 
 
 # ---------------------------------------------------------------------------
-# 映射表
-# ---------------------------------------------------------------------------
-
-def load_secu_meta_mapping(path):
-    """加载 SecuMetaMapping.jsonl（一行一个 {Code, Region, Market} JSON）
-
-    :param path: 文件路径
-    :return: dict {Code: (Region, Market)}
-    :raises ImportError_: 文件缺失，或没有任何有效记录时抛出
-    """
-    if not os.path.isfile(path):
-        raise ImportError_("证券元信息映射表不存在：%s" % path)
-    mapping = {}
-    bad = 0
-    with open(path, "r", encoding="utf-8") as f:
-        for line_no, raw in enumerate(f, 1):
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            try:
-                data = json.loads(line)
-            except ValueError:
-                _log("⚠️ %s 第 %d 行不是合法 JSON，已跳过" % (path, line_no))
-                bad += 1
-                continue
-            if not isinstance(data, dict):
-                bad += 1
-                continue
-            code = str(data.get("Code", "")).strip()
-            region = str(data.get("Region", "")).strip()
-            market = str(data.get("Market", "")).strip()
-            if not (code and region and market):
-                _log("⚠️ %s 第 %d 行缺 Code/Region/Market，已跳过" % (path, line_no))
-                bad += 1
-                continue
-            mapping[code] = (region, market)
-    if not mapping:
-        raise ImportError_("证券元信息映射表无有效记录：%s" % path)
-    _log("[INFO] 映射表 %s：有效 %d 条，跳过 %d 条" % (path, len(mapping), bad))
-    return mapping
-
-
-# ---------------------------------------------------------------------------
 # Supabase Data API（PostgREST）最小客户端
 # ---------------------------------------------------------------------------
 
@@ -648,31 +711,146 @@ def parse_rows(text):
     return data
 
 
-def fetch_secu_timezone(client, code):
-    """查证券元数据登记表 `finv_quote_secu`，取该证券的 timezone（兼作导出准入校验）
+def fetch_registered_secus(client):
+    """一次取回 `finv_quote_secu` 的**全部**登记行（而非逐 Code 单查，见 docstring 第十二节）
+
+    keyset 游标按 `usc`（主键）升序翻页；登记表只有几十行，实际恒为一页。
 
     未登记的证券**不予导出**（见 docstring 第三节）：文件头的 `# 时区` / `# Timezone` 取自此表，
     取不到就产不出合格的文件，故宁可少导，也不产出缺值的半成品。
 
     :param client: SupabaseRestClient
-    :param code: 证券代码（裸码，如 IAU）
-    :return: (timezone, registered, error)：
-        - 未登记            → (None, False, None)
-        - 已登记但值为空    → (None, True, None)
-        - 已登记且值非空    → ("Asia/Shanghai", True, None)
-        - 查询失败          → (None, False, "失败原因")
+    :return: (dict {usc: (region, market, timezone)}, error)
+        - 成功       → ({...}, None)
+        - 查询失败   → (已取到的部分, "失败原因")
     """
-    qs = ("select=timezone&%s=eq.%s&limit=1"
-          % (SECU_TABLE_CODE_COLUMN, urllib.parse.quote(code, safe="")))
-    try:
-        rows = parse_rows(client.query(SECU_TABLE, qs,
-                                       operation="查 %s 的登记信息" % code))
-    except ImportError_ as e:
-        return None, False, str(e)
-    if not rows:
-        return None, False, None
-    timezone = (rows[0].get("timezone") or "").strip()
-    return (timezone or None), True, None
+    rows = {}
+    last = None
+    while True:
+        qs = ("select=%s&order=%s.asc&limit=%d"
+              % (SECU_TABLE_COLUMNS, SECU_TABLE_CODE_COLUMN, DEFAULT_PAGE_SIZE))
+        if last is not None:
+            qs += "&%s=gt.%s" % (SECU_TABLE_CODE_COLUMN, urllib.parse.quote(last, safe=""))
+        try:
+            page = parse_rows(client.query(SECU_TABLE, qs, operation="取登记表全量"))
+        except ImportError_ as e:
+            return rows, str(e)
+        for r in page:
+            code = (r.get(SECU_TABLE_CODE_COLUMN) or "").strip()
+            if code:
+                rows[code] = ((r.get("region") or "").strip(),
+                              (r.get("market") or "").strip(),
+                              (r.get("timezone") or "").strip())
+        page_last = (page[-1].get(SECU_TABLE_CODE_COLUMN) or "").strip() if page else ""
+        if len(page) < DEFAULT_PAGE_SIZE or not page_last or page_last == last:
+            return rows, None
+        last = page_last
+
+
+def scan_source_secus(client, cap=INVENTORY_MAX_SECU):
+    """盘点源库里**实际存有数据**的全部 usc（keyset 逐跳，见 docstring 第十二节）
+
+    PostgREST 没有 `DISTINCT` / `GROUP BY`，一条 SQL 取不回去重清单，故逐跳：
+    `order=usc.asc,ts.asc` + `limit=1` + `usc=gt.<上一个>` —— 每次都走主键索引 (usc, ts)
+    取「下一个更大的 usc」及其最早一条记录（ts 升序下的第一行），跳 N 次得 N 个证券。
+    代价是 N+1 次请求（每次只回 1 行；N 是证券数，**不是行数**）。
+
+    :param client: SupabaseRestClient
+    :param cap: 最多遍历多少个（防上游证券数暴增拖垮运行）
+    :return: ([(usc, first_ts)], truncated, error)
+        - truncated=True 表示触到 cap 上限，清单不完整
+    """
+    found = []
+    last = None
+    while len(found) < cap:
+        qs = ("select=%s,ts&order=%s.asc,ts.asc&limit=1"
+              % (SECU_TABLE_CODE_COLUMN, SECU_TABLE_CODE_COLUMN))
+        if last is not None:
+            qs += "&%s=gt.%s" % (SECU_TABLE_CODE_COLUMN, urllib.parse.quote(last, safe=""))
+        try:
+            page = parse_rows(client.query(TABLE, qs, operation="盘点源库证券清单"))
+        except ImportError_ as e:
+            return found, False, str(e)
+        if not page:
+            return found, False, None
+        code = (page[0].get(SECU_TABLE_CODE_COLUMN) or "").strip()
+        if not code or code == last:      # 游标没前进：防上游数据异常时空转
+            return found, False, None
+        found.append((code, page[0].get("ts")))
+        last = code
+    return found, True, None
+
+
+def audit_secu_inventory(client, registry):
+    """运行开头盘点一次源库存量，把两份名单做差后打进日志（见 docstring 第十二节）
+
+    两份名单各管一段：
+
+        ① 源库 `finv_quote_secu_kline_min`  上游**实际在采**什么（扫描得到，是实测清单）
+        ② 登记表 `finv_quote_secu`          唯一名单：既定准入（见第三节），
+                                           也供落点路径的 Region/Market 与 timezone
+                                           （见第五节）
+
+    ① 有而 ② 没有的，就是「上游在采、这边无声漏掉」的证券 —— 本盘点的目的就是把它们
+    **逐只点名**，而不是让它们每轮静默缺席（既不在名单里，日志连一条「跳过」都不会有）。
+
+    盘点失败**不阻断导出**：只记告警，主流程照常。
+
+    :param registry: 已取回的登记表 {usc: (region, market, timezone)}（由 main 传入，避免重复查询）
+    """
+    _log("")
+    _log("===== 源库证券盘点（%s）=====" % TABLE)
+
+    source, truncated, err = scan_source_secus(client)
+    if err:
+        _log("⚠️ 源库清单盘点中断（已扫到 %d 个），以下仅就扫到的部分做差：%s"
+             % (len(source), err))
+    if truncated:
+        _log("⚠️ 已触遍历上限 %d 个，清单不完整 —— 调大 INVENTORY_MAX_SECU 可继续"
+             % INVENTORY_MAX_SECU)
+
+    def fmt_ts(value):
+        try:
+            return datetime.datetime.fromtimestamp(
+                int(value), tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return "?"
+
+    src_codes = set(code for code, _ in source)
+    unregistered = [(c, ts) for c, ts in source if c not in registry]
+    no_tz = [c for c, _ in source if c in registry and not registry[c][2]]
+    ready = [c for c, _ in source if c in registry and registry[c][2]]
+    no_data = [c for c in registry if c not in src_codes]
+
+    _log("[INFO] 源库有数据 %d 个 / 登记表 %d 个；其中可导出 %d 个"
+         % (len(source), len(registry), len(ready)))
+    for code, ts in source:
+        meta = registry.get(code)
+        if meta is None:
+            mark, detail = "[未登记]", "-"
+        else:
+            mark = "[已登记]"
+            detail = "%s/%s %s" % (meta[0] or "?", meta[1] or "?",
+                                   meta[2] or "(timezone 空)")
+        _log("[INFO]   %s %s %s | 最早 %s UTC" % (code, mark, detail, fmt_ts(ts)))
+
+    if unregistered:
+        _log("⚠️ 源库有数据、但 %s 未登记 %d 个 —— 每轮都导不出，逐只点名如下："
+             % (SECU_TABLE, len(unregistered)))
+        for code, ts in unregistered:
+            _log("      %s  最早记录 %s UTC" % (code, fmt_ts(ts)))
+        _log("      ↑ 在 %s 补一行（usc / region / market / timezone）后，"
+             "下次运行即会导出 —— 名单只有这一处，不必再改别的地方"
+             % SECU_TABLE)
+    else:
+        _log("[INFO] 源库有数据的证券**全部已登记**，无遗漏")
+
+    if no_tz:
+        _log("⚠️ 已登记但 timezone 为空 %d 个（补上 timezone 即放行）：%s"
+             % (len(no_tz), ", ".join(no_tz)))
+    if no_data:
+        _log("⚠️ 已登记但源库无数据 %d 个（仍会被尝试；因 usc 探测 0 行，将记为 failed）—— "
+             "要么上游没采，要么 Code 形态不符：%s" % (len(no_data), ", ".join(no_data)))
 
 
 def fetch_week_rows(client, usc, start_ts, end_ts, page_size):
@@ -893,6 +1071,207 @@ def pick_target_path(cfg, region, market, code, iso_year, iso_week):
 
 
 # ---------------------------------------------------------------------------
+# 每日批次：公平顺序 + 周屏障 + 配额（见 docstring 第十三节）
+# ---------------------------------------------------------------------------
+
+def export_name_re(region, market, code):
+    """拼出该证券落点文件名的正则
+
+    周号零填充两位，故 `..._202605.mvsv` 与 `..._202650.mvsv` 不会互相误配。
+
+    :return: 已编译的正则；第 1 组 = ISO 年，第 2 组 = ISO 周号
+    """
+    return re.compile(EXPORT_NAME_RE_TEMPLATE
+                      % (re.escape(region), re.escape(market), re.escape(code)))
+
+
+def next_iso_week(iso_year, iso_week):
+    """该周的下一个 ISO 周（跨年自动进位）
+
+    :return: (iso_year, iso_week)
+    """
+    start, _ = week_bounds_utc(iso_year, iso_week)
+    return iso_label_of(start + datetime.timedelta(days=7))
+
+
+def prev_iso_week(iso_year, iso_week):
+    """该周的上一个 ISO 周（跨年自动退位）
+
+    :return: (iso_year, iso_week)
+    """
+    start, _ = week_bounds_utc(iso_year, iso_week)
+    return iso_label_of(start - datetime.timedelta(days=1))
+
+
+def max_exportable_week(now_utc=None):
+    """当前允许导出的**最大**周（其结束时刻距今已满 WEEK_END_LAG_DAYS 天）
+
+    合格条件是 `end <= now - 14d`。cutoff 落在某周内 ⇒ 该周的 end 仍在 cutoff 之后 ⇒
+    不合格，故取它的上一周。
+
+    :param now_utc: 基准时刻（默认当前 UTC；测试可注入）
+    :return: (iso_year, iso_week)
+    """
+    now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(days=WEEK_END_LAG_DAYS)
+    return prev_iso_week(*iso_label_of(cutoff))
+
+
+def resolve_daily_quota(raw):
+    """解析每日配额（单位：数据行数）
+
+    未设置 → DEFAULT_DAILY_QUOTA；0 或负数 → **不限额**（导出该周全部待导证券）。
+
+    :raises ImportError_: 取值不是整数时抛出
+    """
+    s = (raw or "").strip()
+    if not s:
+        return DEFAULT_DAILY_QUOTA
+    try:
+        return int(s)
+    except ValueError:
+        raise ImportError_("%s 不是整数：%s（应为正整数行数；0 = 不限额）"
+                           % (ENV_DAILY_QUOTA, raw))
+
+
+def weekly_order(codes, iso_year, iso_week):
+    """本周的导出顺序：首位轮转 + 其余按周哈希洗牌（**确定性**，见 docstring 第十三节 ②）
+
+    :param codes: 本周待导的证券（入参顺序无关，内部先归一，故结果可复现）
+    :return: 排好序的新列表
+    """
+    pool = sorted(codes)
+    if len(pool) <= 1:
+        return pool
+    # 单调周序号：取该周周一的 ordinal（连续整数，跨年不跳号、不重叠）
+    idx = datetime.date.fromisocalendar(iso_year, iso_week, 1).toordinal()
+    head = pool[idx % len(pool)]
+    rest = sorted((c for c in pool if c != head),
+                  key=lambda c: hashlib.sha256(
+                      ("%04d-%02d|%s" % (iso_year, iso_week, c)).encode("utf-8")).digest())
+    return [head] + rest
+
+
+def list_exported_weeks(cfg, region, market, code):
+    """该证券在目标分支上**已产出**的周集合（从目录清单的文件名反解）
+
+    一次 Contents API 拿整个证券目录，本地正则反解周号。**进度以此为准**，不依赖源库是否
+    删除（见 docstring 第十三节）。
+
+    :return: (weeks, names, error)：
+        - weeks: set of (iso_year, iso_week)；目录不存在 → 空集
+        - names: 原始文件名集合（供落点环节复用，省一次请求）
+        - error: 失败原因；成功时为 None
+    """
+    dir_path = TARGET_DIR_TEMPLATE % (region, market, code)
+    names, err = list_remote_dir(cfg, dir_path)
+    if err:
+        return None, None, "列举目标目录失败（%s）：%s" % (dir_path, err)
+    pat = export_name_re(region, market, code)
+    weeks = set()
+    for name in names:
+        m = pat.match(name)
+        if m:
+            weeks.add((int(m.group(1)), int(m.group(2))))
+    return weeks, names, None
+
+
+def pending_week(earliest_label, exported_weeks, max_label):
+    """该证券**最早一个尚未产出**的周（见 docstring 第十三节 ①）
+
+    从源库最早记录所在周起逐周前进、跳过目标仓库已有的。中间若有空洞（某周漏导）会返回
+    那个空洞，而不是直接跳到末尾。
+
+    :param earliest_label: 源库最早记录所在的周 (iso_year, iso_week)
+    :param exported_weeks: 目标仓库已产出的周集合
+    :param max_label: 允许导出的最大周（含）
+    :return: (iso_year, iso_week)；已追平（无待导出）时返回 None
+    """
+    label = earliest_label
+    while label <= max_label:                 # 元组比较：年在前，等价于时间先后
+        if label not in exported_weeks:
+            return label
+        label = next_iso_week(*label)
+    return None
+
+
+def plan_daily_batch(client, cfg, registry, codes):
+    """定出本次批次的计划：导哪一周、按什么顺序、哪些证券待导（docstring 第十三节）
+
+    每只证券各一次源库查询（复用 `week_of_earliest_record`，同时充当 usc 有效性探测）
+    与一次目标仓库目录列举 —— N 只证券约 2N 次请求。
+
+    :return: (plan, error)。plan 为 dict：
+        - week:    本次要导的周 (iso_year, iso_week)；无待导时为 None
+        - ordered: 该周的待导证券，已按 `weekly_order` 排好
+        - awaiting: 已领先于本次周、需等下一周的证券数
+        - blocked: {code: 原因}，未进入队列的证券及原因
+    """
+    max_label = max_exportable_week()
+    _log("[INFO] 当前可导出的最大周（结束距今满 %d 天）：%04dWW%02d"
+         % (WEEK_END_LAG_DAYS, max_label[0], max_label[1]))
+
+    blocked, pendings = {}, {}
+    _log("[INFO] 逐只推算「最早未产出的周」：")
+    for code in codes:
+        meta = registry.get(code)
+        if meta is None:
+            blocked[code] = "未在 %s 中登记" % SECU_TABLE
+            continue
+        region, market, timezone = meta
+        if not timezone:
+            blocked[code] = "已登记但 timezone 为空（文件头缺值，不予导出）"
+            continue
+
+        earliest_ts, earliest_label = week_of_earliest_record(client, code)
+        if earliest_ts is None:
+            blocked[code] = "源库无任何记录（usc 探测 0 行）"
+            continue
+
+        exported, _names, err = list_exported_weeks(cfg, region, market, code)
+        if err:
+            blocked[code] = err
+            continue
+
+        label = pending_week(earliest_label, exported, max_label)
+        if label is None:
+            blocked[code] = ("已追平：%04dWW%02d 及以前均已产出" % (max_label[0], max_label[1]))
+            continue
+        pendings[code] = label
+        _log("[INFO]   %s → 待导 %04dWW%02d（目标仓库已产出 %d 周，源库最早 %04dWW%02d）"
+             % (code, label[0], label[1], len(exported),
+                earliest_label[0], earliest_label[1]))
+
+    if not pendings:
+        return {"week": None, "ordered": [], "awaiting": 0, "blocked": blocked}, None
+
+    week = min(pendings.values())
+    ready = [c for c in pendings if pendings[c] == week]
+    ordered = weekly_order(ready, week[0], week[1])
+    awaiting = len(pendings) - len(ready)
+
+    _log("[INFO] 周屏障：本次目标周 = %04dWW%02d（待导 %d 只；另有 %d 只已领先，须等下一周）"
+         % (week[0], week[1], len(ordered), awaiting))
+
+    # 队列积压提示：屏障取 min，故任何一只证券的**历史缺口**都会把整条队列按在那一周。
+    # 首次运行（或某只证券换了 Region/Market 落点、目标目录还是空的）必然如此，
+    # 会按每日配额逐日补齐；但也有可能是配额小于「每周新增 ÷ 7」导致的还不上账。
+    _, week_end = week_bounds_utc(*week)
+    overdue = (datetime.datetime.now(datetime.timezone.utc) - week_end).days - WEEK_END_LAG_DAYS
+    if overdue > 7:
+        _log("[WARN] 队列积压：目标周结束于 %s，超出入库线已 %d 天"
+             % (week_end.strftime("%Y-%m-%d"), overdue))
+        _log("[WARN]   常见成因：① 首次运行 / 某只证券的目标目录还是空的（历史缺口要逐日补）；"
+             "② 配额低于「每周新增行数 ÷ 7」，队列每天还不上账")
+        _log("[WARN]   当前配额 %s —— 积压不再增长才对；若逐日变大，请调高 %s"
+             % ("不限" if cfg["daily_quota"] <= 0 else "%d 行" % cfg["daily_quota"],
+                ENV_DAILY_QUOTA))
+    _log("[INFO] 公平顺序（首位轮转 + 其余按周哈希洗牌，确定性）：%s%s"
+         % (", ".join(ordered[:12]), " …" if len(ordered) > 12 else ""))
+    return {"week": week, "ordered": ordered, "awaiting": awaiting, "blocked": blocked}, None
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -909,7 +1288,7 @@ def resolve_config():
               os.environ.get("CURR_BRANCH", "") or os.environ.get("GITHUB_REF_NAME", "")).strip() \
         or DEFAULT_BRANCH
 
-    # 留空 = 用映射表里的全部 Code（由 main 载入映射表后补齐）
+    # 留空 = 取登记表 finv_quote_secu 中的全部 usc（由 main 取回登记表后补齐）
     codes = [c.strip() for c in codes_raw.split(",") if c.strip()] or None
 
     page_size_raw = os.environ.get("SUPABASE_PAGE_SIZE", "").strip()
@@ -925,6 +1304,7 @@ def resolve_config():
         "week_raw": week_raw,
         "branch": branch,
         "page_size": page_size,
+        "daily_quota": resolve_daily_quota(os.environ.get(ENV_DAILY_QUOTA, "")),
         "enable_delete": env_bool(ENV_ENABLE_DELETE, False),
         "project_ref": os.environ.get("SUPABASE_PROJECT_REF", "").strip(),
         "api_key": os.environ.get("SUPABASE_KEY", "").strip(),
@@ -932,29 +1312,27 @@ def resolve_config():
     }
 
 
-def process_one(client, cfg, mapping, code, mapping_path):
+def process_one(client, cfg, registry, code, target_week=None, stats=None):
     """处理单个证券：登记校验 → 探测=取最早记录 →（定周）→ 取数 → 生成 → 提交
 
+    登记表 `finv_quote_secu` 是**唯一**名单：既是准入名单，也供落点路径的 Region/Market
+    与文件头的 Timezone（docstring 第三节、第五节）。
+
+    :param target_week: 批次计划指定的周 (iso_year, iso_week)；None = 按老规矩自行定周。
+        显式 WEEK 参数的优先级高于它（docstring 第十三节）
+    :param stats: 可选出参 dict；成功落库后写入 rows / week / path，供调用方累计配额
     :return: ("ok"|"skipped"|"failed"|"partial", 结果描述)
     """
-    meta = mapping.get(code)
+    meta = registry.get(code)
     if meta is None:
-        return "failed", "Code %s 在 %s 中无记录（拿不到 Region/Market）" % (code, mapping_path)
-    region, market = meta
-
-    # 准入校验：未在 finv_quote_secu 登记（或 timezone 为空）的证券不予导出
-    # —— 文件头的 # 时区 / # Timezone 取自此表，取不到就产不出合格文件（docstring 第三节）
-    timezone, registered, err = fetch_secu_timezone(client, code)
-    if err:
-        return "failed", "查 %s 登记信息失败：%s" % (SECU_TABLE, err)
-    if not registered:
         return "skipped", ("未在 %s 中登记（%s=eq.%s 查无此行）—— 按约定不予导出；"
                            "补全该证券的元数据后重跑即可"
                            % (SECU_TABLE, SECU_TABLE_CODE_COLUMN, code))
+    region, market, timezone = meta
     if not timezone:
         return "skipped", ("已在 %s 中登记，但其 timezone 为空 —— 文件头需要时区值，"
                            "故不予导出；补全 timezone 后重跑即可" % SECU_TABLE)
-    _log("[INFO] 登记校验通过：timezone = %s" % timezone)
+    _log("[INFO] 登记校验通过：Region=%s Market=%s timezone=%s" % (region, market, timezone))
 
     # 一次查询两用：探测 usc 取值是否可用 + 取该证券最早记录用于定周
     earliest_ts, auto_label = week_of_earliest_record(client, code)
@@ -970,7 +1348,11 @@ def process_one(client, cfg, mapping, code, mapping_path):
             iso_year, iso_week = parse_week_arg(cfg["week_raw"])
         except ImportError_ as e:
             return "failed", str(e)
-        _log("[INFO] 目标周取自参数：%04dWW%02d" % (iso_year, iso_week))
+        _log("[INFO] 目标周取自参数：%04dWW%02d（手动路径）" % (iso_year, iso_week))
+        auto_mode = False
+    elif target_week is not None:
+        iso_year, iso_week = target_week
+        _log("[INFO] 目标周取自批次计划（周屏障）：%04dWW%02d" % (iso_year, iso_week))
         auto_mode = False
     else:
         iso_year, iso_week = auto_label
@@ -991,7 +1373,6 @@ def process_one(client, cfg, mapping, code, mapping_path):
     start_ts = int(start.timestamp())
     end_ts = int(end.timestamp())
 
-    _log("[INFO] 证券 %s：Region=%s Market=%s" % (code, region, market))
     _log("[INFO] 目标周 %04dWW%02d：UTC [%s, %s)  ts [%d, %d)"
           % (iso_year, iso_week,
              start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1029,6 +1410,11 @@ def process_one(client, cfg, mapping, code, mapping_path):
     if not result.get("success"):
         return "failed", "提交失败：%s" % result.get("message")
     export_msg = "提交成功（HTTP %s，%s）" % (result.get("http_status"), path_key)
+    if stats is not None:
+        # 只有**确实落库**的行才计入配额：提交失败时不计，下次运行会重试同一只
+        stats["rows"] = len(rows)
+        stats["week"] = (iso_year, iso_week)
+        stats["path"] = path_key
 
     # 导出已确认落库，才轮到「删源库」这一步（见 docstring 第七节）
     delete_msg = purge_source_rows(client, cfg, code, start_ts, end_ts, rows)
@@ -1097,7 +1483,7 @@ def purge_source_rows(client, cfg, code, start_ts, end_ts, exported_rows):
 
 
 def main():
-    """入口：解析配置 → 载入映射表 → 逐证券独立处理 → 汇总退出码"""
+    """入口：解析配置 → 取登记表 →（定批次）→ 逐证券处理 → 汇总退出码"""
     _ensure_console_utf8()
     # 依赖模块写往 stderr 的告警也带上时间前缀（stdout 侧由 _log 负责）
     sys.stderr = _TimestampedStream(sys.stderr)
@@ -1115,45 +1501,84 @@ def main():
         _log("❌ 缺少 GIT_COMMIT_TOKEN")
         return 1
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    mapping_path = os.environ.get("SECU_META_MAPPING", "").strip() \
-        or os.path.join(script_dir, SECU_META_MAPPING_FILE)
-
-    try:
-        mapping = load_secu_meta_mapping(mapping_path)
-    except ImportError_ as e:
-        _log("❌ %s" % e)
-        return 1
-
-    # 未指定证券时取映射表中的全部 Code（保持文件内顺序，结果可复现）
-    codes = cfg["codes"] if cfg["codes"] else list(mapping.keys())
-    if cfg["codes"]:
-        _log("[INFO] 待处理证券取自参数：%d 个" % len(codes))
-    else:
-        _log("[INFO] 未指定证券 → 取映射表中的全部 Code：%d 个" % len(codes))
-
     try:
         client = SupabaseRestClient(cfg["project_ref"], cfg["api_key"])
     except ImportError_ as e:
         _log("❌ %s" % e)
         return 1
 
+    # 名单只有一处：登记表 finv_quote_secu —— 既定准入，也供 Region/Market 与 Timezone
+    # （docstring 第三节、第五节）。取不到就无法确定名单，故为硬失败。
+    registry, err = fetch_registered_secus(client)
+    if err:
+        _log("❌ 取登记表 %s 全量失败（名单与 Region/Market/Timezone 均出自该表）：%s"
+             % (SECU_TABLE, err))
+        return 1
+
+    # 未指定证券时取登记表中的全部 usc（按主键升序，结果可复现）
+    codes = cfg["codes"] if cfg["codes"] else list(registry.keys())
+    if cfg["codes"]:
+        _log("[INFO] 待处理证券取自参数：%d 个" % len(codes))
+    else:
+        _log("[INFO] 未指定证券 → 取 %s 登记表中的全部证券：%d 个" % (SECU_TABLE, len(codes)))
+
     _log("[INFO] 目标分支 = %s" % cfg["branch"])
     _log("[INFO] 删除源库开关 %s = %s" % (ENV_ENABLE_DELETE,
                                       "开" if cfg["enable_delete"] else "关（安全模式，只导出不删除）"))
+    _log("[INFO] 每日配额 %s = %s"
+         % (ENV_DAILY_QUOTA,
+            "不限额" if cfg["daily_quota"] <= 0 else "%d 行" % cfg["daily_quota"]))
+
+    # 逐证券处理之前先盘一次源库存量：把「上游在采、这边名单里没有」的证券逐只点名
+    audit_secu_inventory(client, registry)
+
+    # 两条路径（docstring 第十三节）：
+    #   手动 —— 显式指定 WEEK：运维动作，全部证券同一周，**不受每日配额限制**
+    #   日常 —— 周屏障定出目标周，按公平顺序导到配额为止
     if cfg["week_raw"]:
-        _log("[INFO] 目标周：%s（全部证券同一周）" % cfg["week_raw"])
+        _log("[INFO] 目标周：%s（全部证券同一周；手动路径，**不受每日配额限制**）"
+             % cfg["week_raw"])
+        queue = [(code, None) for code in codes]
+        quota = 0
     else:
-        _log("[INFO] 目标周：未指定 → 逐个证券取其「最早一条记录」所在的周")
+        _log("[INFO] 目标周：未指定 → 走每日批次（周屏障 + 公平顺序 + 配额）")
+        plan, err = plan_daily_batch(client, cfg, registry, codes)
+        if err:
+            _log("❌ 批次计划失败：%s" % err)
+            return 1
+        if plan["blocked"]:
+            _log("")
+            _log("[INFO] 未进入本次队列的 %d 只：" % len(plan["blocked"]))
+            for code in sorted(plan["blocked"]):
+                _log("[INFO]   %s：%s" % (code, plan["blocked"][code]))
+        if plan["week"] is None:
+            _log("")
+            _log("[INFO] 全部证券均已追平可导出周 —— 本次无待导数据"
+                  "（正常：新的一周尚未跨过 %d 天线）" % WEEK_END_LAG_DAYS)
+            return 0
+        queue = [(code, plan["week"]) for code in plan["ordered"]]
+        quota = cfg["daily_quota"]
 
     ok, skipped, failed, partial = [], [], [], []
-    for i, code in enumerate(codes, 1):
+    exported_rows = 0
+    for i, (code, week) in enumerate(queue, 1):
+        if quota > 0 and exported_rows >= quota:
+            _log("")
+            _log("[INFO] 已达每日配额 %d 行（本批实际已导 %d 行）—— 就此收工；"
+                  "剩余 %d 只留待下次运行（屏障会自动接上同一周 %04dWW%02d）"
+                  % (quota, exported_rows, len(queue) - i + 1, week[0], week[1]))
+            break
         _log("")
-        _log("===== [%d/%d] 证券 %s 开始 =====" % (i, len(codes), code))
+        _log("===== [%d/%d] 证券 %s 开始（本批已导 %d 行）====="
+             % (i, len(queue), code, exported_rows))
+        stats = {}
         try:
-            status, message = process_one(client, cfg, mapping, code, mapping_path)
+            status, message = process_one(client, cfg, registry, code,
+                                          target_week=week, stats=stats)
         except ImportError_ as e:
             status, message = "failed", str(e)
+        exported_rows += stats.get("rows", 0)
+        _log("[INFO] 本只 %d 行，本批累计 %d 行" % (stats.get("rows", 0), exported_rows))
         if status == "ok":
             ok.append(code)
             _log("✅ %s：%s" % (code, message))
@@ -1172,6 +1597,8 @@ def main():
 
     _log("")
     _log("===== 汇总 =====")
+    _log("本批实际导出 %d 行（配额 %s）"
+         % (exported_rows, "不限" if quota <= 0 else "%d 行" % quota))
     _log("成功 %d 个：%s" % (len(ok), fmt(ok)))
     _log("跳过 %d 个：%s" % (len(skipped), fmt(skipped)))
     _log("失败 %d 个：%s" % (len(failed), fmt(failed)))
