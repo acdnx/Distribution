@@ -203,7 +203,7 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
         「该周无数据」→ 产出仅含文件头的空文件（不算跳过）；
         「自动定周但历史尚未攒够 14 天」→ 跳过；
         「未在 finv_quote_secu 登记 / 其 timezone 为空」→ 跳过（补全元数据后重跑即可）。
-    1 = 致命错误（凭据缺失 / 分支未定 / 映射表缺失）或全部证券失败
+    1 = 致命错误（凭据缺失 / 分支未定 / 登记表取不回）或全部证券失败
     2 = 部分证券失败，或有证券「已导出但源库未删净」（partial）
 
 十二、存量盘点：源库里到底有哪些证券（2026-09-15）
@@ -241,12 +241,53 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
 `INVENTORY_MAX_SECU` 兜住上游证券数暴增。登记表则不同 —— 它是名单本身，取不到即整轮退出
 （见第三节）。
 
+十三、每日批次：公平顺序、周屏障与配额（2026-09-15）
+----------------------------------------------------------------------------------------
+目标（ACANX 2026-09-15 定）：**每天都有货交付**，而不是每周集中爆一次、其余六天闲置。
+
+先说清一件事：稳态下这只能靠**有意保留一个已合格但未导出的队列**实现。所有证券的周都在
+同一瞬间跨过 14 天线（第二节），所以「每天跑全量」并不会让数据更早到达，只是把爆发原样
+推迟到那一天。要每天有货，就得让队列活过整周。
+
+三条规则共同构成一个**无状态**的日调度（不引入任何新表、新文件、新状态字段）：
+
+    ① 周屏障 —— 前一周全部导完，才碰下一周
+       对每只证券算「最早一个尚未产出的周」next(c)，取 W_now = min next(c)，本次只导
+       W_now。有证券没导完 W_now ⇒ 它的 next 还停在 W_now ⇒ min 不动 ⇒ 下次继续 W_now，
+       **不会跳周**；某证券该周无数据不影响 min（min 取小，且空周本身要产出空文件）。
+
+    ② 公平顺序 —— weekly_order()：首位按周序号轮转（每 N 周每只证券**恰好**当一次第一，
+       是硬保证而非概率收敛），其余按 sha256("<年>-<周>|<usc>") 排序。
+       **必须是确定性的**：用 random.random() 的话，手动重跑或任务重试会重新洗牌 ——
+       同一天两次运行导出两批不同证券，配额翻倍、跨天边界错乱。哈希排序保证同一周
+       永远同一个顺序。
+
+    ③ 配额 —— DAILY_EXPORT_QUOTA（行数，见第八节）。按 ② 的顺序逐只导出，累计**实际
+       数据行数**达到配额即停，剩下的留到下次（它们的 next 仍是 W_now，屏障自动接上）。
+       证券是**原子单位**：不切半只，故最后一只可能小幅超出。空周文件计 0 行，不占配额。
+
+**进度以目标仓库为准，不以源库是否删除为准。** 判据是「该证券该周的文件是否已在目标分支
+上」—— 导出的语义本就是「在目标仓库产生文件」，源库删不删只是防膨胀的实现细节。故本节
+**不依赖第七节的删除开关**：ACANX 2026-09-15 定「暂不删源库，等稳定后再开启」，而源库不删
+时 `week_of_earliest_record()` 永远返回历史第一周，进度就只能由目标仓库的已产出集合推进
+（`list_exported_weeks()`）。副产品是**幂等** —— 同一周不会被重复导出（ACANX：「证券 A 在
+周一已导出，周二~六没必要再重复导一遍」），重跑也安全。
+
+**配额的下界**：必须 ≥「每周新增行数 ÷ 7」。低于它则队列每天还不上，滞后无上限累积
+（W_now 会越来越落后于当前可导出周）。反过来要「每天有货」也不宜 ≥ 每周总量，否则一天
+就清空队列，剩下的六天依旧无事可做。
+
+显式指定 `WEEK` 时走**手动路径**：全部证券同一周、**不受配额限制**（运维动作而非日常调度）；
+此时同名文件按第六节加 `_N` 后缀，允许重复导出，用于数据订正。
+
 【环境要求】Python 3.8+，仅标准库；可直连 api.github.com 与 *.supabase.co。
 """
 
 import datetime
+import hashlib
 import json
 import os
+import re
 import sys
 import urllib.parse
 from decimal import Decimal
@@ -296,13 +337,22 @@ MVSV_FIELD_TYPES = ("int|int|int|Decimal|Decimal|Decimal|Decimal|Decimal|"
 # 供应商标识（本需求固定 FT）
 PROVIDER = "FT"
 
+# 落点目录模板（见模块 docstring 第五节）：<Region>_<Market>/<Code>
+# 文件名模板拼接其上，故二者的 `%` 参数按同一顺序连续消费：
+#     (region, market, code, region, market, code, iso_year, iso_week)
+TARGET_DIR_TEMPLATE = "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s"
+
 # 落点路径模板（见模块 docstring 第五节）
-TARGET_PATH_TEMPLATE = "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s/%s_%s_%s_MIN_FT_%04d%02d.mvsv"
+TARGET_PATH_TEMPLATE = TARGET_DIR_TEMPLATE + "/%s_%s_%s_MIN_FT_%04d%02d.mvsv"
 
 # 同名冲突规避：目标文件已存在时改用 _N 后缀（见 docstring 第六节）
 TARGET_PATH_CONFLICT_TEMPLATE = \
-    "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s/%s_%s_%s_MIN_FT_%04d%02d_%d.mvsv"
+    TARGET_DIR_TEMPLATE + "/%s_%s_%s_MIN_FT_%04d%02d_%d.mvsv"
 CONFLICT_SUFFIX_MAX = 99
+
+# 文件名反解用的正则**模板**：<Region>_<Market>_<Code>_MIN_FT_<yyyy><WW>[_N].mvsv
+# 周号**零填充两位**（%04d%02d），故 `202605` 不会误配 `202650`（见 docstring 第十三节）
+EXPORT_NAME_RE_TEMPLATE = r"^%s_%s_%s_MIN_FT_(\d{4})(\d{2})(?:_\d+)?\.mvsv$"
 
 # 周结束距今至少需要的天数（见 docstring 第二节）
 WEEK_END_LAG_DAYS = 14
@@ -314,6 +364,16 @@ DEFAULT_PAGE_SIZE = 1000
 # 删除源库数据的安全开关（见 docstring 第七节）。**默认关**：关时只打印「待删除」清单，
 # 一个字节都不动库。开关名与语义对齐姊妹仓库 ACANX/Distribution 的 SupabaseSyncMvsv.py。
 ENV_ENABLE_DELETE = "SUPABASE_ENABLE_DELETE"
+
+# 每日导出配额（单位：**数据行数**，见 docstring 第十三节）。
+# 取值来源刻意**不放在 workflow_dispatch 界面里**：由仓库变量 DAILY_EXPORT_QUOTA
+# （Settings → Secrets and variables → Actions → Variables）注入，改它不必改本文件、
+# 不必发 PR、也不必重新触发工作流；未设置时回落到下面的默认值。
+ENV_DAILY_QUOTA = "DAILY_EXPORT_QUOTA"
+
+# 配额缺省值：约「每周新增行数 ÷ 7」，使队列正好一周清空一轮（当前每周约 6.9 万行）。
+# 低于「每周新增 ÷ 7」会让队列每天还不上、滞后无上限累积 —— 见 docstring 第十三节。
+DEFAULT_DAILY_QUOTA = 10000
 
 # PostgREST 请求超时（秒）
 HTTP_TIMEOUT = 60
@@ -990,6 +1050,207 @@ def pick_target_path(cfg, region, market, code, iso_year, iso_week):
 
 
 # ---------------------------------------------------------------------------
+# 每日批次：公平顺序 + 周屏障 + 配额（见 docstring 第十三节）
+# ---------------------------------------------------------------------------
+
+def export_name_re(region, market, code):
+    """拼出该证券落点文件名的正则
+
+    周号零填充两位，故 `..._202605.mvsv` 与 `..._202650.mvsv` 不会互相误配。
+
+    :return: 已编译的正则；第 1 组 = ISO 年，第 2 组 = ISO 周号
+    """
+    return re.compile(EXPORT_NAME_RE_TEMPLATE
+                      % (re.escape(region), re.escape(market), re.escape(code)))
+
+
+def next_iso_week(iso_year, iso_week):
+    """该周的下一个 ISO 周（跨年自动进位）
+
+    :return: (iso_year, iso_week)
+    """
+    start, _ = week_bounds_utc(iso_year, iso_week)
+    return iso_label_of(start + datetime.timedelta(days=7))
+
+
+def prev_iso_week(iso_year, iso_week):
+    """该周的上一个 ISO 周（跨年自动退位）
+
+    :return: (iso_year, iso_week)
+    """
+    start, _ = week_bounds_utc(iso_year, iso_week)
+    return iso_label_of(start - datetime.timedelta(days=1))
+
+
+def max_exportable_week(now_utc=None):
+    """当前允许导出的**最大**周（其结束时刻距今已满 WEEK_END_LAG_DAYS 天）
+
+    合格条件是 `end <= now - 14d`。cutoff 落在某周内 ⇒ 该周的 end 仍在 cutoff 之后 ⇒
+    不合格，故取它的上一周。
+
+    :param now_utc: 基准时刻（默认当前 UTC；测试可注入）
+    :return: (iso_year, iso_week)
+    """
+    now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(days=WEEK_END_LAG_DAYS)
+    return prev_iso_week(*iso_label_of(cutoff))
+
+
+def resolve_daily_quota(raw):
+    """解析每日配额（单位：数据行数）
+
+    未设置 → DEFAULT_DAILY_QUOTA；0 或负数 → **不限额**（导出该周全部待导证券）。
+
+    :raises ImportError_: 取值不是整数时抛出
+    """
+    s = (raw or "").strip()
+    if not s:
+        return DEFAULT_DAILY_QUOTA
+    try:
+        return int(s)
+    except ValueError:
+        raise ImportError_("%s 不是整数：%s（应为正整数行数；0 = 不限额）"
+                           % (ENV_DAILY_QUOTA, raw))
+
+
+def weekly_order(codes, iso_year, iso_week):
+    """本周的导出顺序：首位轮转 + 其余按周哈希洗牌（**确定性**，见 docstring 第十三节 ②）
+
+    :param codes: 本周待导的证券（入参顺序无关，内部先归一，故结果可复现）
+    :return: 排好序的新列表
+    """
+    pool = sorted(codes)
+    if len(pool) <= 1:
+        return pool
+    # 单调周序号：取该周周一的 ordinal（连续整数，跨年不跳号、不重叠）
+    idx = datetime.date.fromisocalendar(iso_year, iso_week, 1).toordinal()
+    head = pool[idx % len(pool)]
+    rest = sorted((c for c in pool if c != head),
+                  key=lambda c: hashlib.sha256(
+                      ("%04d-%02d|%s" % (iso_year, iso_week, c)).encode("utf-8")).digest())
+    return [head] + rest
+
+
+def list_exported_weeks(cfg, region, market, code):
+    """该证券在目标分支上**已产出**的周集合（从目录清单的文件名反解）
+
+    一次 Contents API 拿整个证券目录，本地正则反解周号。**进度以此为准**，不依赖源库是否
+    删除（见 docstring 第十三节）。
+
+    :return: (weeks, names, error)：
+        - weeks: set of (iso_year, iso_week)；目录不存在 → 空集
+        - names: 原始文件名集合（供落点环节复用，省一次请求）
+        - error: 失败原因；成功时为 None
+    """
+    dir_path = TARGET_DIR_TEMPLATE % (region, market, code)
+    names, err = list_remote_dir(cfg, dir_path)
+    if err:
+        return None, None, "列举目标目录失败（%s）：%s" % (dir_path, err)
+    pat = export_name_re(region, market, code)
+    weeks = set()
+    for name in names:
+        m = pat.match(name)
+        if m:
+            weeks.add((int(m.group(1)), int(m.group(2))))
+    return weeks, names, None
+
+
+def pending_week(earliest_label, exported_weeks, max_label):
+    """该证券**最早一个尚未产出**的周（见 docstring 第十三节 ①）
+
+    从源库最早记录所在周起逐周前进、跳过目标仓库已有的。中间若有空洞（某周漏导）会返回
+    那个空洞，而不是直接跳到末尾。
+
+    :param earliest_label: 源库最早记录所在的周 (iso_year, iso_week)
+    :param exported_weeks: 目标仓库已产出的周集合
+    :param max_label: 允许导出的最大周（含）
+    :return: (iso_year, iso_week)；已追平（无待导出）时返回 None
+    """
+    label = earliest_label
+    while label <= max_label:                 # 元组比较：年在前，等价于时间先后
+        if label not in exported_weeks:
+            return label
+        label = next_iso_week(*label)
+    return None
+
+
+def plan_daily_batch(client, cfg, registry, codes):
+    """定出本次批次的计划：导哪一周、按什么顺序、哪些证券待导（docstring 第十三节）
+
+    每只证券各一次源库查询（复用 `week_of_earliest_record`，同时充当 usc 有效性探测）
+    与一次目标仓库目录列举 —— N 只证券约 2N 次请求。
+
+    :return: (plan, error)。plan 为 dict：
+        - week:    本次要导的周 (iso_year, iso_week)；无待导时为 None
+        - ordered: 该周的待导证券，已按 `weekly_order` 排好
+        - awaiting: 已领先于本次周、需等下一周的证券数
+        - blocked: {code: 原因}，未进入队列的证券及原因
+    """
+    max_label = max_exportable_week()
+    _log("[INFO] 当前可导出的最大周（结束距今满 %d 天）：%04dWW%02d"
+         % (WEEK_END_LAG_DAYS, max_label[0], max_label[1]))
+
+    blocked, pendings = {}, {}
+    _log("[INFO] 逐只推算「最早未产出的周」：")
+    for code in codes:
+        meta = registry.get(code)
+        if meta is None:
+            blocked[code] = "未在 %s 中登记" % SECU_TABLE
+            continue
+        region, market, timezone = meta
+        if not timezone:
+            blocked[code] = "已登记但 timezone 为空（文件头缺值，不予导出）"
+            continue
+
+        earliest_ts, earliest_label = week_of_earliest_record(client, code)
+        if earliest_ts is None:
+            blocked[code] = "源库无任何记录（usc 探测 0 行）"
+            continue
+
+        exported, _names, err = list_exported_weeks(cfg, region, market, code)
+        if err:
+            blocked[code] = err
+            continue
+
+        label = pending_week(earliest_label, exported, max_label)
+        if label is None:
+            blocked[code] = ("已追平：%04dWW%02d 及以前均已产出" % (max_label[0], max_label[1]))
+            continue
+        pendings[code] = label
+        _log("[INFO]   %s → 待导 %04dWW%02d（目标仓库已产出 %d 周，源库最早 %04dWW%02d）"
+             % (code, label[0], label[1], len(exported),
+                earliest_label[0], earliest_label[1]))
+
+    if not pendings:
+        return {"week": None, "ordered": [], "awaiting": 0, "blocked": blocked}, None
+
+    week = min(pendings.values())
+    ready = [c for c in pendings if pendings[c] == week]
+    ordered = weekly_order(ready, week[0], week[1])
+    awaiting = len(pendings) - len(ready)
+
+    _log("[INFO] 周屏障：本次目标周 = %04dWW%02d（待导 %d 只；另有 %d 只已领先，须等下一周）"
+         % (week[0], week[1], len(ordered), awaiting))
+
+    # 队列积压提示：屏障取 min，故任何一只证券的**历史缺口**都会把整条队列按在那一周。
+    # 首次运行（或某只证券换了 Region/Market 落点、目标目录还是空的）必然如此，
+    # 会按每日配额逐日补齐；但也有可能是配额小于「每周新增 ÷ 7」导致的还不上账。
+    _, week_end = week_bounds_utc(*week)
+    overdue = (datetime.datetime.now(datetime.timezone.utc) - week_end).days - WEEK_END_LAG_DAYS
+    if overdue > 7:
+        _log("[WARN] 队列积压：目标周结束于 %s，超出入库线已 %d 天"
+             % (week_end.strftime("%Y-%m-%d"), overdue))
+        _log("[WARN]   常见成因：① 首次运行 / 某只证券的目标目录还是空的（历史缺口要逐日补）；"
+             "② 配额低于「每周新增行数 ÷ 7」，队列每天还不上账")
+        _log("[WARN]   当前配额 %s —— 积压不再增长才对；若逐日变大，请调高 %s"
+             % ("不限" if cfg["daily_quota"] <= 0 else "%d 行" % cfg["daily_quota"],
+                ENV_DAILY_QUOTA))
+    _log("[INFO] 公平顺序（首位轮转 + 其余按周哈希洗牌，确定性）：%s%s"
+         % (", ".join(ordered[:12]), " …" if len(ordered) > 12 else ""))
+    return {"week": week, "ordered": ordered, "awaiting": awaiting, "blocked": blocked}, None
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -1022,6 +1283,7 @@ def resolve_config():
         "week_raw": week_raw,
         "branch": branch,
         "page_size": page_size,
+        "daily_quota": resolve_daily_quota(os.environ.get(ENV_DAILY_QUOTA, "")),
         "enable_delete": env_bool(ENV_ENABLE_DELETE, False),
         "project_ref": os.environ.get("SUPABASE_PROJECT_REF", "").strip(),
         "api_key": os.environ.get("SUPABASE_KEY", "").strip(),
@@ -1029,12 +1291,15 @@ def resolve_config():
     }
 
 
-def process_one(client, cfg, registry, code):
+def process_one(client, cfg, registry, code, target_week=None, stats=None):
     """处理单个证券：登记校验 → 探测=取最早记录 →（定周）→ 取数 → 生成 → 提交
 
     登记表 `finv_quote_secu` 是**唯一**名单：既是准入名单，也供落点路径的 Region/Market
     与文件头的 Timezone（docstring 第三节、第五节）。
 
+    :param target_week: 批次计划指定的周 (iso_year, iso_week)；None = 按老规矩自行定周。
+        显式 WEEK 参数的优先级高于它（docstring 第十三节）
+    :param stats: 可选出参 dict；成功落库后写入 rows / week / path，供调用方累计配额
     :return: ("ok"|"skipped"|"failed"|"partial", 结果描述)
     """
     meta = registry.get(code)
@@ -1062,7 +1327,11 @@ def process_one(client, cfg, registry, code):
             iso_year, iso_week = parse_week_arg(cfg["week_raw"])
         except ImportError_ as e:
             return "failed", str(e)
-        _log("[INFO] 目标周取自参数：%04dWW%02d" % (iso_year, iso_week))
+        _log("[INFO] 目标周取自参数：%04dWW%02d（手动路径）" % (iso_year, iso_week))
+        auto_mode = False
+    elif target_week is not None:
+        iso_year, iso_week = target_week
+        _log("[INFO] 目标周取自批次计划（周屏障）：%04dWW%02d" % (iso_year, iso_week))
         auto_mode = False
     else:
         iso_year, iso_week = auto_label
@@ -1120,6 +1389,11 @@ def process_one(client, cfg, registry, code):
     if not result.get("success"):
         return "failed", "提交失败：%s" % result.get("message")
     export_msg = "提交成功（HTTP %s，%s）" % (result.get("http_status"), path_key)
+    if stats is not None:
+        # 只有**确实落库**的行才计入配额：提交失败时不计，下次运行会重试同一只
+        stats["rows"] = len(rows)
+        stats["week"] = (iso_year, iso_week)
+        stats["path"] = path_key
 
     # 导出已确认落库，才轮到「删源库」这一步（见 docstring 第七节）
     delete_msg = purge_source_rows(client, cfg, code, start_ts, end_ts, rows)
@@ -1188,7 +1462,7 @@ def purge_source_rows(client, cfg, code, start_ts, end_ts, exported_rows):
 
 
 def main():
-    """入口：解析配置 → 载入映射表 → 逐证券独立处理 → 汇总退出码"""
+    """入口：解析配置 → 取登记表 →（定批次）→ 逐证券处理 → 汇总退出码"""
     _ensure_console_utf8()
     # 依赖模块写往 stderr 的告警也带上时间前缀（stdout 侧由 _log 负责）
     sys.stderr = _TimestampedStream(sys.stderr)
@@ -1230,22 +1504,60 @@ def main():
     _log("[INFO] 目标分支 = %s" % cfg["branch"])
     _log("[INFO] 删除源库开关 %s = %s" % (ENV_ENABLE_DELETE,
                                       "开" if cfg["enable_delete"] else "关（安全模式，只导出不删除）"))
-    if cfg["week_raw"]:
-        _log("[INFO] 目标周：%s（全部证券同一周）" % cfg["week_raw"])
-    else:
-        _log("[INFO] 目标周：未指定 → 逐个证券取其「最早一条记录」所在的周")
+    _log("[INFO] 每日配额 %s = %s"
+         % (ENV_DAILY_QUOTA,
+            "不限额" if cfg["daily_quota"] <= 0 else "%d 行" % cfg["daily_quota"]))
 
     # 逐证券处理之前先盘一次源库存量：把「上游在采、这边名单里没有」的证券逐只点名
     audit_secu_inventory(client, registry)
 
+    # 两条路径（docstring 第十三节）：
+    #   手动 —— 显式指定 WEEK：运维动作，全部证券同一周，**不受每日配额限制**
+    #   日常 —— 周屏障定出目标周，按公平顺序导到配额为止
+    if cfg["week_raw"]:
+        _log("[INFO] 目标周：%s（全部证券同一周；手动路径，**不受每日配额限制**）"
+             % cfg["week_raw"])
+        queue = [(code, None) for code in codes]
+        quota = 0
+    else:
+        _log("[INFO] 目标周：未指定 → 走每日批次（周屏障 + 公平顺序 + 配额）")
+        plan, err = plan_daily_batch(client, cfg, registry, codes)
+        if err:
+            _log("❌ 批次计划失败：%s" % err)
+            return 1
+        if plan["blocked"]:
+            _log("")
+            _log("[INFO] 未进入本次队列的 %d 只：" % len(plan["blocked"]))
+            for code in sorted(plan["blocked"]):
+                _log("[INFO]   %s：%s" % (code, plan["blocked"][code]))
+        if plan["week"] is None:
+            _log("")
+            _log("[INFO] 全部证券均已追平可导出周 —— 本次无待导数据"
+                  "（正常：新的一周尚未跨过 %d 天线）" % WEEK_END_LAG_DAYS)
+            return 0
+        queue = [(code, plan["week"]) for code in plan["ordered"]]
+        quota = cfg["daily_quota"]
+
     ok, skipped, failed, partial = [], [], [], []
-    for i, code in enumerate(codes, 1):
+    exported_rows = 0
+    for i, (code, week) in enumerate(queue, 1):
+        if quota > 0 and exported_rows >= quota:
+            _log("")
+            _log("[INFO] 已达每日配额 %d 行（本批实际已导 %d 行）—— 就此收工；"
+                  "剩余 %d 只留待下次运行（屏障会自动接上同一周 %04dWW%02d）"
+                  % (quota, exported_rows, len(queue) - i + 1, week[0], week[1]))
+            break
         _log("")
-        _log("===== [%d/%d] 证券 %s 开始 =====" % (i, len(codes), code))
+        _log("===== [%d/%d] 证券 %s 开始（本批已导 %d 行）====="
+             % (i, len(queue), code, exported_rows))
+        stats = {}
         try:
-            status, message = process_one(client, cfg, registry, code)
+            status, message = process_one(client, cfg, registry, code,
+                                          target_week=week, stats=stats)
         except ImportError_ as e:
             status, message = "failed", str(e)
+        exported_rows += stats.get("rows", 0)
+        _log("[INFO] 本只 %d 行，本批累计 %d 行" % (stats.get("rows", 0), exported_rows))
         if status == "ok":
             ok.append(code)
             _log("✅ %s：%s" % (code, message))
@@ -1264,6 +1576,8 @@ def main():
 
     _log("")
     _log("===== 汇总 =====")
+    _log("本批实际导出 %d 行（配额 %s）"
+         % (exported_rows, "不限" if quota <= 0 else "%d 行" % quota))
     _log("成功 %d 个：%s" % (len(ok), fmt(ok)))
     _log("跳过 %d 个：%s" % (len(skipped), fmt(skipped)))
     _log("失败 %d 个：%s" % (len(failed), fmt(failed)))

@@ -2,9 +2,12 @@ name: SupabaseImportWeekMvsv
 
 on:
   schedule:
-    # 每周日 UTC 00:20（北京 08:20）：整周数据在「次周日 00:00 UTC」跨过 14 天线，
-    # 故每周日 0 点后跑一次即可覆盖刚满两周的那一周
-    - cron: '20 0 * * 0'
+    # 每天 UTC 00:20（北京 08:20）跑一次。目的不是「每天多采一次」，而是**每天交付一批**：
+    # 整周数据只在「次周日 00:00 UTC」这一瞬间跨过 14 天线（见脚本 docstring 第二节），
+    # 所以周日那次往队列里放入新的一周，其余六天按每日配额把它分批导完
+    # （周屏障 + 公平顺序 + 配额，见 docstring 第十三节）。
+    # 触发时刻刻意压在 0:00 之后 20 分钟：任何一只证券等待「新周可导」都不会超过这 20 分钟。
+    - cron: '20 0 * * *'
   workflow_dispatch:
     inputs:
       code:
@@ -13,7 +16,7 @@ on:
         required: false
         default: ''
       week:
-        description: 目标周 yyyyWW（如 202625；留空 = 取该证券最早一条记录所在的周）
+        description: 目标周 yyyyWW（如 202625）。留空 = 走每日批次；填了则手动导该周，全部证券同一周且不受配额限制
         type: string
         required: false
         default: ''
@@ -57,6 +60,19 @@ jobs:
         with:
           python-version: '3.14'
 
+      # 先把本次运行的参数打进日志：日志自证，避免「改了仓库变量没生效」这类问题靠猜
+      - name: 打印运行参数
+        env:
+          DAILY_EXPORT_QUOTA: ${{ vars.DAILY_EXPORT_QUOTA }}
+        run: |
+          echo "触发方式   : ${{ github.event_name }}"
+          echo "分支       : ${{ inputs.branch || 'quote' }}"
+          echo "证券       : ${{ inputs.code || '(登记表 finv_quote_secu 中的全部)' }}"
+          echo "周         : ${{ inputs.week || '(留空 → 每日批次：周屏障 + 公平顺序 + 配额)' }}"
+          echo "页面大小   : ${{ inputs.pageSize || '1000' }}"
+          echo "删源库     : ${{ inputs.enableDelete || 'false' }}"
+          echo "每日配额   : ${DAILY_EXPORT_QUOTA:-(仓库变量未设置 → 脚本用默认值)}"
+
       - name: RunSupabaseImportWeekMvsv
         env:
           # 必填：GitHub 写仓库令牌（经 Contents API 提交 .mvsv 到本分支用）
@@ -68,12 +84,22 @@ jobs:
           # finv_quote_secu 登记表中的全部 usc。多个时**逐个独立处理**
           # （各自查询 / 各自一份文件 / 各自一次提交）
           SECU_CODE: ${{ inputs.code }}
-          # 目标周：留空则由脚本取该证券「最早一条记录」所在的周
+          # 目标周：留空 = 走每日批次（周屏障 + 公平顺序 + 配额，见 docstring 第十三节）；
+          # 填了 = 手动路径，全部证券同一周且**不受每日配额限制**（运维动作）
           WEEK: ${{ inputs.week }}
           SUPABASE_PAGE_SIZE: ${{ inputs.pageSize || '1000' }}
+          # 每日导出配额（**数据行数**）。刻意走**仓库变量**而非 workflow_dispatch 输入：
+          # 在 Settings → Secrets and variables → Actions → Variables 里改，即时生效，
+          # 不必改本文件、不必发 PR、也不必从界面重新触发。未设置时用脚本默认值 10000。
+          # 取 0 = 不限额（一天导完整个待导队列，即回到「一周集中爆一次」的老行为）。
+          # ⚠️ 下界：须 ≥「每周新增行数 ÷ 7」（当前约 6.9 万 ÷ 7 ≈ 1 万），
+          # 低于它则队列每天还不上、滞后无上限累积。详见 docstring 第十三节。
+          DAILY_EXPORT_QUOTA: ${{ vars.DAILY_EXPORT_QUOTA || '10000' }}
           # 导出成功后是否删除源库中对应证券对应周的数据（数据迁移）。
           # **默认 false**：定时触发无 inputs，恒为 false ⇒ 定时任务永不删库；
-          # 只有手动触发并显式选 true 才会删，且删前会复核「库中现值 == 本次导出的行」
+          # 只有手动触发并显式选 true 才会删，且删前会复核「库中现值 == 本次导出的行」。
+          # ACANX 2026-09-15 定：暂不删源库，等稳定后再开启 —— 进度判定不依赖它
+          # （以目标仓库已产出的文件为准，见 docstring 第十三节）。
           SUPABASE_ENABLE_DELETE: ${{ inputs.enableDelete || 'false' }}
           CURR_BRANCH: ${{ inputs.branch || 'quote' }}
           PYTHONIOENCODING: utf-8
