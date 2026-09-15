@@ -75,13 +75,14 @@ Supabase Data API（PostgREST）默认一次最多回 1000 行，而 7×24 品�
 
 五、落点路径
 ----------------------------------------------------------------------------------------
-    Data/Finv/SecuQuoteWeek/FT/{region}_{market}/{Code}/{region}_{market}_{Code}_MIN_{yyyyWW}.mvsv
+    Data/Finv/SecuQuoteWeek/FT/{region}_{market}/{Code}/{region}_{market}_{Code}_MIN_FT_{yyyyWW}.mvsv
 
 例（Code=IAU / region=US / market=ARCA / yyyyWW=202625）：
-    Data/Finv/SecuQuoteWeek/FT/US_ARCA/IAU/US_ARCA_IAU_MIN_202625.mvsv
+    Data/Finv/SecuQuoteWeek/FT/US_ARCA/IAU/US_ARCA_IAU_MIN_FT_202625.mvsv
 
 与既有 Day 规范 Data/Finv/SecuQuote/FT/{Freq}/{Region}_{Market}/{Code}/… **七层同构**，
-唯一差异是周期与日期段（_Min_FT_yyyyMMdd ↔ _MIN_yyyyWW）。
+唯一差异是频率段与日期段（_Min_FT_yyyyMMdd ↔ _MIN_FT_yyyyWW）：_FT_ 段的位置、大小写
+与既有 Day 文件完全一致，只有频率标记（Min/MIN）和周/日粒度不同。
 
 Region / Market **不在表里**，由同目录 SecuMetaMapping.jsonl 按 Code 查得。
 
@@ -116,7 +117,22 @@ Region / Market **不在表里**，由同目录 SecuMetaMapping.jsonl 按 Code �
 
 查询语句会打进日志，故 usc 的真实取值形态从首次运行的日志即可读出。
 
-八、退出码
+八、日志
+----------------------------------------------------------------------------------------
+每一行日志都带 `[yyMMdd.HHmmss.SSS]` 时间前缀（毫秒 3 位），便于排查与分析各环节耗时：
+
+    [260915.083000.123] [INFO] 证券 IAU：Region=US Market=ARCA
+
+**逐行 flush 不可省**：CI 里 stdout 是管道、非 TTY，Python 默认块缓冲，日志会攒到进程结束才
+一次性写出，导致 GitHub 侧的接收时间戳全部挤在同一秒 —— 逐行 flush 后，行内时间前缀与接收
+时间才对得上。本格式与同目录 DMDCBWD31MigrationFile.py 的 `_now_tag` / `_log` 一致。
+
+**stderr 同样逐行加前缀**：依赖模块 GitHubCommitContent 会向 stderr 写告警（如
+「提交目标解析: 仓库 = …」），Actions 把 stdout/stderr 合流展示，不加前缀的行会混在日志里。
+故 main() 启动时把 sys.stderr 包一层（_TimestampedStream），只作用于本进程，**不改动该模块
+本身**（它同时被本目录其他脚本复用）。
+
+九、退出码
 ----------------------------------------------------------------------------------------
     0 = 全部证券处理完毕（含「该周无数据」→ 产出仅含文件头的空文件；含「自动定周但历史
         尚未攒够 14 天」→ 跳过，两者均属预期状态）
@@ -163,7 +179,7 @@ MVSV_FIELD_TYPES = ("int|int|int|Decimal|Decimal|Decimal|Decimal|Decimal|"
 PROVIDER = "FT"
 
 # 落点路径模板（见模块 docstring 第五节）
-TARGET_PATH_TEMPLATE = "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s/%s_%s_%s_MIN_%04d%02d.mvsv"
+TARGET_PATH_TEMPLATE = "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s/%s_%s_%s_MIN_FT_%04d%02d.mvsv"
 
 # 周结束距今至少需要的天数（见 docstring 第二节）
 WEEK_END_LAG_DAYS = 14
@@ -181,6 +197,72 @@ HTTP_TIMEOUT = 60
 
 class ImportError_(Exception):
     """本工具的业务错误（与内建 ImportError 区分开，避免误捕获）"""
+
+
+# ---------------------------------------------------------------------------
+# 日志：每行带 [yyMMdd.HHmmss.SSS] 前缀，逐行 flush
+# ---------------------------------------------------------------------------
+
+def _now_tag():
+    """当前时间戳，格式 yyMMdd.HHmmss.SSS（毫秒 3 位）
+
+    例：260915.083000.123。用于给日志行加前缀，方便排查、分析链路执行耗时。
+
+    :return: 时间戳字符串
+    """
+    now = datetime.datetime.now()
+    return now.strftime("%y%m%d.%H%M%S") + ".%03d" % (now.microsecond // 1000)
+
+
+def _log(message):
+    """带 yyMMdd.HHmmss.SSS 时间前缀的日志输出（走 stdout）
+
+    flush=True 不可省：CI 里 stdout 是管道、非 TTY，Python 默认块缓冲，日志会攒到
+    进程结束才一次性写出，导致 GitHub 侧的接收时间戳全部挤在同一秒、与实际产出时刻
+    相差几十秒。逐行 flush 后，日志行的接收时间与行内 [yyMMdd.HHmmss.SSS] 前缀才能对上。
+
+    :param message: 日志内容（可含 [INFO] 等分级前缀）
+    """
+    print("[%s] %s" % (_now_tag(), message), flush=True)
+
+
+class _TimestampedStream:
+    """给写入流的每一行加 [yyMMdd.HHmmss.SSS] 前缀的薄包装
+
+    仅用于 stderr：本脚本自己的输出走 _log()（stdout，已带前缀），但依赖模块
+    GitHubCommitContent 会向 stderr 写告警，Actions 把两股流合流展示，那些行会不带
+    前缀地混进来。这里在本进程内包一层即可，不改动该模块本身。
+
+    未定义的行为一律透传给底层流（flush / encoding / isatty / reconfigure / fileno …），
+    故对调用方仍是「一个 file-like 对象」。跨多次 write 的半行不会被重复加前缀。
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._at_line_start = True
+
+    def write(self, text):
+        """按行加前缀后转发；返回值为底层流的写法（字符数），与 file-like 约定一致
+
+        :param text: 待写入文本
+        :return: 写入的字符数
+        """
+        if not text:
+            return 0
+        for part in text.splitlines(True):
+            if self._at_line_start:
+                self._stream.write("[%s] " % _now_tag())
+            self._stream.write(part)
+            self._at_line_start = part.endswith("\n")
+        self._stream.flush()
+        return len(text)
+
+    def flush(self):
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        # 仅当常规查找失败时才会走到这里；_stream 存于实例字典，不会递归
+        return getattr(self._stream, name)
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +418,7 @@ def load_secu_meta_mapping(path):
             try:
                 data = json.loads(line)
             except ValueError:
-                print("⚠️ %s 第 %d 行不是合法 JSON，已跳过" % (path, line_no))
+                _log("⚠️ %s 第 %d 行不是合法 JSON，已跳过" % (path, line_no))
                 bad += 1
                 continue
             if not isinstance(data, dict):
@@ -346,13 +428,13 @@ def load_secu_meta_mapping(path):
             region = str(data.get("Region", "")).strip()
             market = str(data.get("Market", "")).strip()
             if not (code and region and market):
-                print("⚠️ %s 第 %d 行缺 Code/Region/Market，已跳过" % (path, line_no))
+                _log("⚠️ %s 第 %d 行缺 Code/Region/Market，已跳过" % (path, line_no))
                 bad += 1
                 continue
             mapping[code] = (region, market)
     if not mapping:
         raise ImportError_("证券元信息映射表无有效记录：%s" % path)
-    print("[INFO] 映射表 %s：有效 %d 条，跳过 %d 条" % (path, len(mapping), bad))
+    _log("[INFO] 映射表 %s：有效 %d 条，跳过 %d 条" % (path, len(mapping), bad))
     return mapping
 
 
@@ -451,7 +533,7 @@ def fetch_week_rows(client, usc, start_ts, end_ts, page_size):
         data = parse_rows(client.query(TABLE, qs, operation="取数第 %d 页" % (page + 1)))
         page += 1
         rows.extend(data)
-        print("[INFO]   第 %d 页：%d 行（累计 %d）" % (page, len(data), len(rows)))
+        _log("[INFO]   第 %d 页：%d 行（累计 %d）" % (page, len(data), len(rows)))
         if len(data) < page_size:
             break
         cursor = int(data[-1]["ts"])
@@ -588,7 +670,7 @@ def process_one(client, cfg, mapping, code, mapping_path):
     if earliest_ts is None:
         return "failed", ("usc 探测 0 行（usc=eq.%s）—— 该取值在本表中无任何记录，"
                           "疑为取值形态不符，**不产出任何文件**" % code)
-    print("[INFO] usc 探测通过：最早记录 ts=%d（%s UTC）"
+    _log("[INFO] usc 探测通过：最早记录 ts=%d（%s UTC）"
           % (earliest_ts, datetime.datetime.fromtimestamp(earliest_ts, tz=datetime.timezone.utc)
              .strftime("%Y-%m-%d %H:%M:%S")))
 
@@ -597,11 +679,11 @@ def process_one(client, cfg, mapping, code, mapping_path):
             iso_year, iso_week = parse_week_arg(cfg["week_raw"])
         except ImportError_ as e:
             return "failed", str(e)
-        print("[INFO] 目标周取自参数：%04dWW%02d" % (iso_year, iso_week))
+        _log("[INFO] 目标周取自参数：%04dWW%02d" % (iso_year, iso_week))
         auto_mode = False
     else:
         iso_year, iso_week = auto_label
-        print("[INFO] 未指定周 → 取该证券最早一条记录所在的周：%04dWW%02d" % (iso_year, iso_week))
+        _log("[INFO] 未指定周 → 取该证券最早一条记录所在的周：%04dWW%02d" % (iso_year, iso_week))
         auto_mode = True
 
     # 「周结束距今满 14 天」：显式指定时违反 = 调用方写错（硬失败）；
@@ -619,24 +701,24 @@ def process_one(client, cfg, mapping, code, mapping_path):
     end_ts = int(end.timestamp())
     path_key = build_target_path(region, market, code, iso_year, iso_week)
 
-    print("[INFO] 证券 %s：Region=%s Market=%s" % (code, region, market))
-    print("[INFO] 目标周 %04dWW%02d：UTC [%s, %s)  ts [%d, %d)"
+    _log("[INFO] 证券 %s：Region=%s Market=%s" % (code, region, market))
+    _log("[INFO] 目标周 %04dWW%02d：UTC [%s, %s)  ts [%d, %d)"
           % (iso_year, iso_week,
              start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"),
              start_ts, end_ts))
-    print("[INFO] 落点路径：%s" % path_key)
+    _log("[INFO] 落点路径：%s" % path_key)
 
     rows = fetch_week_rows(client, code, start_ts, end_ts, cfg["page_size"])
     if not rows:
-        print("[INFO] 该周在库中无记录（如长假）—— 按约定产出仅含文件头的空文件")
+        _log("[INFO] 该周在库中无记录（如长假）—— 按约定产出仅含文件头的空文件")
     else:
-        print("[INFO] 该周共 %d 行，ts 首末 = %s .. %s"
+        _log("[INFO] 该周共 %d 行，ts 首末 = %s .. %s"
               % (len(rows), rows[0].get("ts"), rows[-1].get("ts")))
 
     now_local = datetime.datetime.now().astimezone()
     text = build_mvsv(rows, code, region, market,
                       now_local.strftime("%Y-%m-%d %H:%M:%S"))
-    print("[INFO] .mvsv 生成完毕：%d 行头/数据，%d 字节（UTF-8）"
+    _log("[INFO] .mvsv 生成完毕：%d 行头/数据，%d 字节（UTF-8）"
           % (text.count("\n") + 1, len(text.encode("utf-8"))))
 
     result = commit_content(
@@ -655,18 +737,20 @@ def process_one(client, cfg, mapping, code, mapping_path):
 def main():
     """入口：解析配置 → 载入映射表 → 逐证券独立处理 → 汇总退出码"""
     _ensure_console_utf8()
+    # 依赖模块写往 stderr 的告警也带上时间前缀（stdout 侧由 _log 负责）
+    sys.stderr = _TimestampedStream(sys.stderr)
 
     try:
         cfg = resolve_config()
     except ImportError_ as e:
-        print("❌ %s" % e)
+        _log("❌ %s" % e)
         return 1
 
     if not cfg["project_ref"] or not cfg["api_key"]:
-        print("❌ 缺少 Supabase 凭据（SUPABASE_PROJECT_REF / SUPABASE_KEY）")
+        _log("❌ 缺少 Supabase 凭据（SUPABASE_PROJECT_REF / SUPABASE_KEY）")
         return 1
     if not cfg["token"]:
-        print("❌ 缺少 GIT_COMMIT_TOKEN")
+        _log("❌ 缺少 GIT_COMMIT_TOKEN")
         return 1
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -676,52 +760,54 @@ def main():
     try:
         mapping = load_secu_meta_mapping(mapping_path)
     except ImportError_ as e:
-        print("❌ %s" % e)
+        _log("❌ %s" % e)
         return 1
 
     # 未指定证券时取映射表中的全部 Code（保持文件内顺序，结果可复现）
     codes = cfg["codes"] if cfg["codes"] else list(mapping.keys())
     if cfg["codes"]:
-        print("[INFO] 待处理证券取自参数：%d 个" % len(codes))
+        _log("[INFO] 待处理证券取自参数：%d 个" % len(codes))
     else:
-        print("[INFO] 未指定证券 → 取映射表中的全部 Code：%d 个" % len(codes))
+        _log("[INFO] 未指定证券 → 取映射表中的全部 Code：%d 个" % len(codes))
 
     try:
         client = SupabaseRestClient(cfg["project_ref"], cfg["api_key"])
     except ImportError_ as e:
-        print("❌ %s" % e)
+        _log("❌ %s" % e)
         return 1
 
-    print("[INFO] 目标分支 = %s" % cfg["branch"])
+    _log("[INFO] 目标分支 = %s" % cfg["branch"])
     if cfg["week_raw"]:
-        print("[INFO] 目标周：%s（全部证券同一周）" % cfg["week_raw"])
+        _log("[INFO] 目标周：%s（全部证券同一周）" % cfg["week_raw"])
     else:
-        print("[INFO] 目标周：未指定 → 逐个证券取其「最早一条记录」所在的周")
+        _log("[INFO] 目标周：未指定 → 逐个证券取其「最早一条记录」所在的周")
 
     ok, skipped, failed = [], [], []
     for i, code in enumerate(codes, 1):
-        print("\n===== [%d/%d] 证券 %s 开始 =====" % (i, len(codes), code))
+        _log("")
+        _log("===== [%d/%d] 证券 %s 开始 =====" % (i, len(codes), code))
         try:
             status, message = process_one(client, cfg, mapping, code, mapping_path)
         except ImportError_ as e:
             status, message = "failed", str(e)
         if status == "ok":
             ok.append(code)
-            print("✅ %s：%s" % (code, message))
+            _log("✅ %s：%s" % (code, message))
         elif status == "skipped":
             skipped.append(code)
-            print("⏭️  %s：%s" % (code, message))
+            _log("⏭️  %s：%s" % (code, message))
         else:
             failed.append(code)
-            print("❌ %s：%s" % (code, message))
+            _log("❌ %s：%s" % (code, message))
 
     def fmt(lst):
         return ", ".join(lst) if lst else "（无）"
 
-    print("\n===== 汇总 =====")
-    print("成功 %d 个：%s" % (len(ok), fmt(ok)))
-    print("跳过 %d 个：%s" % (len(skipped), fmt(skipped)))
-    print("失败 %d 个：%s" % (len(failed), fmt(failed)))
+    _log("")
+    _log("===== 汇总 =====")
+    _log("成功 %d 个：%s" % (len(ok), fmt(ok)))
+    _log("跳过 %d 个：%s" % (len(skipped), fmt(skipped)))
+    _log("失败 %d 个：%s" % (len(failed), fmt(failed)))
     # 跳过不算失败：属「历史尚未攒够两周」的正常状态
     if failed and (ok or skipped):
         return 2
