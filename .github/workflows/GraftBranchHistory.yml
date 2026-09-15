@@ -1,0 +1,150 @@
+name: GraftBranchHistory
+
+# 「移花接木」：把一个分支的全部历史压缩成『单个无父提交』，文件内容逐字节不变。
+#
+# 本工作流刻意不使用 actions/checkout ——
+#   它不做任何克隆、不下载仓库的任何文件，只通过 GitHub Git Data API 读写引用，
+#   脚本自身也是用 API 取回的单文件（几 KB）。
+# 因此即便仓库很大，本工作流也不会因下载失败而中断。
+#
+# 使用说明见 .github/Bash/GraftBranchHistory.md
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '执行模式：verify=只读预演 | create=建临时分支 | swap=切换到新提交 | restore=回滚'
+        type: choice
+        options: [verify, create, swap, restore]
+        default: verify
+        required: true
+      source_branch:
+        description: '源分支（要压缩历史的分支）'
+        type: string
+        required: true
+      temp_branch:
+        description: '临时分支名（留空 = new-<源分支>）'
+        type: string
+        required: false
+        default: ''
+      commit_message:
+        description: '新提交的说明（留空 = 自动生成，内含原 tip SHA 便于溯源）'
+        type: string
+        required: false
+        default: ''
+      expected_source_sha:
+        description: '【swap 建议填】create 阶段输出的源分支 tip SHA；不一致时按 on_drift 处理'
+        type: string
+        required: false
+        default: ''
+      on_drift:
+        description: '源分支在 create 之后又被推送时的策略'
+        type: choice
+        options: [abort, retree]
+        default: abort
+        required: true
+      keep_backup:
+        description: '切换前是否留一个备份分支（可一键回滚）'
+        type: boolean
+        default: true
+      restore_sha:
+        description: '【restore 专用】回滚到的 SHA，留空 = 自动找最近的备份分支'
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: '只打印计划，不实际写入'
+        type: boolean
+        default: false
+
+# 同一分支的嫁接操作串行，避免两次运行互相覆盖
+concurrency:
+  group: graft-branch-${{ inputs.source_branch }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  graft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # 默认用仓库自带的 GITHUB_TOKEN（contents:write 足够改写未受保护的分支）。
+      # 若源分支受保护且需要 bypass，或需要让新分支的创建去触发其它工作流，
+      # 则在仓库 Secrets 里配置 GRAFT_PAT（PAT 需 repo 权限），此处会自动优先使用。
+      GH_TOKEN: ${{ secrets.GRAFT_PAT || github.token }}
+      REPO: ${{ github.repository }}
+
+    steps:
+      # 让运行日志自证：参数写进日志，事后可复核这次到底按什么参数跑的
+      - name: 打印运行参数
+        run: |
+          {
+            echo "运行参数"
+            echo "----------------------------------------"
+            echo "仓库        : $REPO"
+            echo "模式        : ${{ inputs.mode }}"
+            echo "源分支      : ${{ inputs.source_branch }}"
+            echo "临时分支    : ${{ inputs.temp_branch }}"
+            echo "期望 tip SHA: ${{ inputs.expected_source_sha }}"
+            echo "漂移策略    : ${{ inputs.on_drift }}"
+            echo "保留备份    : ${{ inputs.keep_backup }}"
+            echo "DRY-RUN     : ${{ inputs.dry_run }}"
+            echo "触发者      : ${{ github.actor }}"
+            echo "脚本所在 ref: ${{ github.ref_name }}"
+            echo "凭据来源    : ${{ secrets.GRAFT_PAT && 'GRAFT_PAT' || 'GITHUB_TOKEN' }}"
+          } | tee /tmp/params.txt
+          {
+            echo "## 运行参数"
+            echo ""
+            echo '```'
+            cat /tmp/params.txt
+            echo '```'
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 只取脚本这一个文件，不检出仓库
+      - name: 取脚本（单文件，不检出仓库）
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/graft"
+          gh api "repos/$REPO/contents/.github/Bash/GraftBranchHistory.sh?ref=${{ github.ref_name }}" \
+            --jq '.content' | base64 -d > "$RUNNER_TEMP/graft/GraftBranchHistory.sh"
+          chmod +x "$RUNNER_TEMP/graft/GraftBranchHistory.sh"
+          echo "已获取脚本 $(wc -c < "$RUNNER_TEMP/graft/GraftBranchHistory.sh") 字节"
+
+      - name: 执行
+        env:
+          MODE: ${{ inputs.mode }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          TEMP_BRANCH: ${{ inputs.temp_branch }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          ON_DRIFT: ${{ inputs.on_drift }}
+          KEEP_BACKUP: ${{ inputs.keep_backup }}
+          RESTORE_SHA: ${{ inputs.restore_sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=(
+            --repo "$REPO"
+            --mode "$MODE"
+            --source "$SOURCE_BRANCH"
+            --on-drift "$ON_DRIFT"
+            --keep-backup "$KEEP_BACKUP"
+          )
+          if [ -n "$TEMP_BRANCH" ];        then args+=( --temp "$TEMP_BRANCH" ); fi
+          if [ -n "$COMMIT_MESSAGE" ];     then args+=( --message "$COMMIT_MESSAGE" ); fi
+          if [ -n "$EXPECTED_SOURCE_SHA" ]; then args+=( --expected-source-sha "$EXPECTED_SOURCE_SHA" ); fi
+          if [ -n "$RESTORE_SHA" ];        then args+=( --restore-sha "$RESTORE_SHA" ); fi
+          # --dry-run 是「不带值的开关」，脚本对带值形式会 die「未知参数」——
+          # 故只能在为 true 时追加，不能写成 --dry-run "$DRY_RUN"。
+          if [ "$DRY_RUN" = "true" ];      then args+=( --dry-run ); fi
+
+          # 让日志自证：把最终拼出的参数原样打出来，参数接线错了能一眼看见
+          printf '实际调用: %q ' "$RUNNER_TEMP/graft/GraftBranchHistory.sh" >&2
+          printf '%q ' "${args[@]}" >&2
+          printf '\n' >&2
+
+          "$RUNNER_TEMP/graft/GraftBranchHistory.sh" "${args[@]}"
