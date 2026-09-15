@@ -5,7 +5,8 @@ on:
     # 每天 UTC 16:30（北京次日 00:30）跑一次。目的不是「每天多采一次」，而是**每天交付一批**：
     # 整周数据只在「次周日 00:00 UTC」这一瞬间跨过 14 天线（见脚本 docstring 第二节），
     # 所以周日那次往队列里放入新的一周，其余六天按每日配额把它分批导完
-    # （周屏障 + 公平顺序 + 配额，见 docstring 第十三节）。
+    # （周升序队列 + 公平顺序 + 配额，见 docstring 第十三节）。
+    # 「配额」是**当天至少要导够的行数**（下限）：队列里还有货就继续取，一轮可以跨周。
     # 注意：GitHub 的 cron 一律按 **UTC** 解释，与仓库时区、运行环境时区都无关
     # （北京 00:30 = UTC 16:30）。
     # 时序：周界 = UTC 周日 00:00 = 北京周日 08:00，到本次运行之间隔约 16.5 小时 ——
@@ -71,7 +72,7 @@ jobs:
           echo "触发方式   : ${{ github.event_name }}"
           echo "分支       : ${{ inputs.branch || 'quote' }}"
           echo "证券       : ${{ inputs.code || '(登记表 finv_quote_secu 中的全部)' }}"
-          echo "周         : ${{ inputs.week || '(留空 → 每日批次：周屏障 + 公平顺序 + 配额)' }}"
+          echo "周         : ${{ inputs.week || '(留空 → 每日批次：周升序队列 + 公平顺序 + 配额)' }}"
           echo "页面大小   : ${{ inputs.pageSize || '1000' }}"
           echo "删源库     : ${{ inputs.enableDelete || 'true' }}"
           echo "每日配额   : ${DAILY_EXPORT_QUOTA:-(仓库变量未设置 → 脚本用默认值)}"
@@ -87,7 +88,7 @@ jobs:
           # finv_quote_secu 登记表中的全部 usc。多个时**逐个独立处理**
           # （各自查询 / 各自一份文件 / 各自一次提交）
           SECU_CODE: ${{ inputs.code }}
-          # 目标周：留空 = 走每日批次（周屏障 + 公平顺序 + 配额，见 docstring 第十三节）；
+          # 目标周：留空 = 走每日批次（周升序队列 + 公平顺序 + 配额，见 docstring 第十三节）；
           # 填了 = 手动路径，全部证券同一周且**不受每日配额限制**（运维动作）
           WEEK: ${{ inputs.week }}
           SUPABASE_PAGE_SIZE: ${{ inputs.pageSize || '1000' }}
