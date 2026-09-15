@@ -2,18 +2,24 @@ name: SupabaseImportWeekMvsv
 
 on:
   schedule:
-    # 每周日 UTC 00:20（北京 08:20）：整周数据在「次周日 00:00 UTC」跨过 14 天线，
-    # 故每周日 0 点后跑一次即可覆盖刚满两周的那一周
-    - cron: '20 0 * * 0'
+    # 每天 UTC 16:30（北京次日 00:30）跑一次。目的不是「每天多采一次」，而是**每天交付一批**：
+    # 整周数据只在「次周日 00:00 UTC」这一瞬间跨过 14 天线（见脚本 docstring 第二节），
+    # 所以周日那次往队列里放入新的一周，其余六天按每日配额把它分批导完
+    # （周屏障 + 公平顺序 + 配额，见 docstring 第十三节）。
+    # 注意：GitHub 的 cron 一律按 **UTC** 解释，与仓库时区、运行环境时区都无关
+    # （北京 00:30 = UTC 16:30）。
+    # 时序：周界 = UTC 周日 00:00 = 北京周日 08:00，到本次运行之间隔约 16.5 小时 ——
+    # 新的一周在北京周日早上就已就绪，但要到北京周一凌晨才被首次处理。
+    - cron: '30 16 * * *'
   workflow_dispatch:
     inputs:
       code:
-        description: 证券代码（如 IAU；留空 = 取 SecuMetaMapping.jsonl 中的全部 Code）
+        description: 证券代码（如 IAU；留空 = 取 finv_quote_secu 登记表中的全部证券）
         type: string
         required: false
         default: ''
       week:
-        description: 目标周 yyyyWW（如 202625；留空 = 取该证券最早一条记录所在的周）
+        description: 目标周 yyyyWW（如 202625）。留空 = 走每日批次；填了则手动导该周，全部证券同一周且不受配额限制
         type: string
         required: false
         default: ''
@@ -34,7 +40,7 @@ on:
           - 'false'
           - 'true'
         required: false
-        default: 'false'
+        default: 'true'
 
 permissions:
   contents: write
@@ -57,6 +63,19 @@ jobs:
         with:
           python-version: '3.14'
 
+      # 先把本次运行的参数打进日志：日志自证，避免「改了仓库变量没生效」这类问题靠猜
+      - name: 打印运行参数
+        env:
+          DAILY_EXPORT_QUOTA: ${{ vars.DAILY_EXPORT_QUOTA }}
+        run: |
+          echo "触发方式   : ${{ github.event_name }}"
+          echo "分支       : ${{ inputs.branch || 'quote' }}"
+          echo "证券       : ${{ inputs.code || '(登记表 finv_quote_secu 中的全部)' }}"
+          echo "周         : ${{ inputs.week || '(留空 → 每日批次：周屏障 + 公平顺序 + 配额)' }}"
+          echo "页面大小   : ${{ inputs.pageSize || '1000' }}"
+          echo "删源库     : ${{ inputs.enableDelete || 'true' }}"
+          echo "每日配额   : ${DAILY_EXPORT_QUOTA:-(仓库变量未设置 → 脚本用默认值)}"
+
       - name: RunSupabaseImportWeekMvsv
         env:
           # 必填：GitHub 写仓库令牌（经 Contents API 提交 .mvsv 到本分支用）
@@ -64,17 +83,30 @@ jobs:
           # 必填：Supabase 凭据（Data API 读 finv_quote_secu_kline_min 用）
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # 待导出证券：手动触发取输入（可逗号分隔多个）；留空则取脚本同目录
-          # SecuMetaMapping.jsonl 中的全部 Code。多个时**逐个独立处理**
+          # 待导出证券：手动触发取输入（可逗号分隔多个）；留空则取
+          # finv_quote_secu 登记表中的全部 usc。多个时**逐个独立处理**
           # （各自查询 / 各自一份文件 / 各自一次提交）
           SECU_CODE: ${{ inputs.code }}
-          # 目标周：留空则由脚本取该证券「最早一条记录」所在的周
+          # 目标周：留空 = 走每日批次（周屏障 + 公平顺序 + 配额，见 docstring 第十三节）；
+          # 填了 = 手动路径，全部证券同一周且**不受每日配额限制**（运维动作）
           WEEK: ${{ inputs.week }}
           SUPABASE_PAGE_SIZE: ${{ inputs.pageSize || '1000' }}
+          # 每日导出配额（**数据行数**）。刻意走**仓库变量**而非 workflow_dispatch 输入：
+          # 在 Settings → Secrets and variables → Actions → Variables 里改，即时生效，
+          # 不必改本文件、不必发 PR、也不必从界面重新触发。未设置时用脚本默认值 10000。
+          # 取 0 = 不限额（一天导完整个待导队列，即回到「一周集中爆一次」的老行为）。
+          # ⚠️ 下界：须 ≥「每周新增行数 ÷ 7」（当前约 6.9 万 ÷ 7 ≈ 1 万），
+          # 低于它则队列每天还不上、滞后无上限累积。详见 docstring 第十三节。
+          DAILY_EXPORT_QUOTA: ${{ vars.DAILY_EXPORT_QUOTA || '10000' }}
           # 导出成功后是否删除源库中对应证券对应周的数据（数据迁移）。
-          # **默认 false**：定时触发无 inputs，恒为 false ⇒ 定时任务永不删库；
-          # 只有手动触发并显式选 true 才会删，且删前会复核「库中现值 == 本次导出的行」
-          SUPABASE_ENABLE_DELETE: ${{ inputs.enableDelete || 'false' }}
+          # **默认 true（ACANX 2026-09-15 定）**：定时触发无 inputs，回落到 'true' ⇒
+          # **定时任务也会删源库**；手动触发可在界面上显式选 false 退回安全模式。
+          # 删前会复核「库中现值 == 本次导出的行」，不一致即拒绝删除（见 docstring 第七节）。
+          # 注：脚本自身的默认仍是「关」—— 本机裸跑 python3（不注入该变量）不会删库。
+          # 为何要开：`Data/**` 会被 DMDCBWD31MigrationFile 每日采集后从本分支删除，
+          # 落点文件随之消失 ⇒ `list_exported_weeks()` 认不出「这一周已经导过」。
+          # 源库里的删除才是唯一能跨天记住进度的锚点，否则队列会卡在最早一周反复重导。
+          SUPABASE_ENABLE_DELETE: ${{ inputs.enableDelete || 'true' }}
           CURR_BRANCH: ${{ inputs.branch || 'quote' }}
           PYTHONIOENCODING: utf-8
         run: python3 .github/Python/SupabaseImportWeekMvsv.py
