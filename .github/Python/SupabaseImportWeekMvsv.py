@@ -859,8 +859,12 @@ def pick_target_path(cfg, region, market, code, iso_year, iso_week):
         return None, None, "列举目标目录失败（%s）：%s" % (dir_path, err)
 
     if base_name not in names:
+        _log("[INFO] 同名探测：列举 %s/ → %d 个文件，无 %s → 用常规命名"
+             % (dir_path, len(names), base_name))
         return base, None, None
 
+    _log("[WARN] 同名探测：列举 %s/ → %d 个文件，发现同名 %s"
+         % (dir_path, len(names), base_name))
     _log("[WARN] 目标文件已存在：%s" % base)
     _log("[WARN]   → 按同名冲突规避，改用 _N 后缀（N 从 1 起，取第一个未占用的）")
     stem = base_name[:-len(".mvsv")]
