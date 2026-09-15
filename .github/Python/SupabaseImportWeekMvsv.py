@@ -199,6 +199,38 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
     1 = 致命错误（凭据缺失 / 分支未定 / 映射表缺失）或全部证券失败
     2 = 部分证券失败，或有证券「已导出但源库未删净」（partial）
 
+十二、存量盘点：源库里到底有哪些证券（2026-09-15）
+----------------------------------------------------------------------------------------
+本工具的导出名单是**人工维护**的（`SecuMetaMapping.jsonl` 的 Code + `finv_quote_secu` 的
+登记行），而上游的采集名单在库里 —— 两者之间**没有任何同步机制**。上游新采的证券不会自动
+出现在本工具的名单里，只会每周无声地缺席：既不在名单里，日志连一条「跳过」都不会有
+（根本没被尝试）。名单里只有 28 个、上游在采 60 个时，那 32 个就是**看不见**的。
+
+故每次运行**开头**盘点一次源库，把三份名单做差后打进日志：
+
+    ① 源库 `finv_quote_secu_kline_min`  上游**实际在采**什么 —— 扫描得到，是实测清单
+    ② 登记表 `finv_quote_secu`          准入名单，决定能不能导出（见第三节）
+    ③ 映射表 `SecuMetaMapping.jsonl`    落点路径要用的 Region/Market（见第五节）
+
+逐只打印 ① 的每个证券及其登记状态，再就四类问题单独点名：
+
+    ！源库有数据、但 finv_quote_secu 未登记 —— **当前要补的就是这批**（附各自最早记录时刻）
+    ！已登记但 timezone 为空                —— 补一列即可放行
+    ！已登记但不在映射表                     —— 取不到 Region/Market，同样导不出
+    ！映射表有、源库无数据                   —— 要么上游没采，要么 Code 形态不符，值得看一眼
+
+**为什么要逐跳而不是一条 SQL**：PostgREST 没有 `DISTINCT` / `GROUP BY`，一条查询取不回去重
+清单。故用 keyset 逐跳 —— `order=usc.asc,ts.asc` + `limit=1` + `usc=gt.<上一个>`，每次都走
+主键索引 (usc, ts) 取「下一个更大的 usc」及其最早一条记录，跳 N 次得 N 个证券：
+
+    GET /rest/v1/finv_quote_secu_kline_min?select=usc,ts&order=usc.asc,ts.asc&limit=1
+    GET /rest/v1/finv_quote_secu_kline_min?select=usc,ts&order=usc.asc,ts.asc&limit=1&usc=gt.<上一个>
+
+代价是 **N+1 次请求**（每次只回 1 行；N 是证券数，不是行数）。证券数上到几百以后，可在库侧
+建 `DISTINCT` 视图或 RPC 收成一次请求 —— 那属于库侧改动，不是本脚本能单方面决定的。
+
+盘点**失败不阻断导出**：只记一条告警，主流程照常；`INVENTORY_MAX_SECU` 兜住上游证券数暴增。
+
 【环境要求】Python 3.8+，仅标准库；可直连 api.github.com 与 *.supabase.co。
 """
 
@@ -231,6 +263,13 @@ SECU_TABLE = "finv_quote_secu"
 
 # SECU_TABLE 中与 finv_quote_secu_kline_min.usc 对应的列（ACANX 2026-09-15 给出建表 DDL 核实）
 SECU_TABLE_CODE_COLUMN = "usc"
+
+# 存量盘点（见 docstring 第十二节）一次取回登记表的列。按 ACANX 2026-09-15 给出的建表 DDL，
+# region / market 与 timezone **同在** finv_quote_secu 一张表里。
+SECU_TABLE_COLUMNS = "usc,region,market,timezone"
+
+# 盘点源库时逐跳遍历 usc 的上限（每跳一次请求）。防上游证券数暴增时拖垮一次运行。
+INVENTORY_MAX_SECU = 500
 
 # 查询列（**按表列名**，与 mvsv 的列序无关）。prev_close / paocd 不取 —— mvsv 字段列表里没有。
 SELECT_COLUMNS = ("ts,date,time,open,close,low,high,volume,turnover,"
@@ -659,6 +698,150 @@ def fetch_secu_timezone(client, code):
         return None, False, None
     timezone = (rows[0].get("timezone") or "").strip()
     return (timezone or None), True, None
+
+
+def fetch_registered_secus(client):
+    """一次取回 `finv_quote_secu` 的**全部**登记行（而非逐 Code 单查，见 docstring 第十二节）
+
+    keyset 游标按 `usc`（主键）升序翻页；登记表只有几十行，实际恒为一页。
+
+    :param client: SupabaseRestClient
+    :return: (dict {usc: (region, market, timezone)}, error)
+        - 成功       → ({...}, None)
+        - 查询失败   → (已取到的部分, "失败原因")
+    """
+    rows = {}
+    last = None
+    while True:
+        qs = ("select=%s&order=%s.asc&limit=%d"
+              % (SECU_TABLE_COLUMNS, SECU_TABLE_CODE_COLUMN, DEFAULT_PAGE_SIZE))
+        if last is not None:
+            qs += "&%s=gt.%s" % (SECU_TABLE_CODE_COLUMN, urllib.parse.quote(last, safe=""))
+        try:
+            page = parse_rows(client.query(SECU_TABLE, qs, operation="取登记表全量"))
+        except ImportError_ as e:
+            return rows, str(e)
+        for r in page:
+            code = (r.get(SECU_TABLE_CODE_COLUMN) or "").strip()
+            if code:
+                rows[code] = ((r.get("region") or "").strip(),
+                              (r.get("market") or "").strip(),
+                              (r.get("timezone") or "").strip())
+        page_last = (page[-1].get(SECU_TABLE_CODE_COLUMN) or "").strip() if page else ""
+        if len(page) < DEFAULT_PAGE_SIZE or not page_last or page_last == last:
+            return rows, None
+        last = page_last
+
+
+def scan_source_secus(client, cap=INVENTORY_MAX_SECU):
+    """盘点源库里**实际存有数据**的全部 usc（keyset 逐跳，见 docstring 第十二节）
+
+    PostgREST 没有 `DISTINCT` / `GROUP BY`，一条 SQL 取不回去重清单，故逐跳：
+    `order=usc.asc,ts.asc` + `limit=1` + `usc=gt.<上一个>` —— 每次都走主键索引 (usc, ts)
+    取「下一个更大的 usc」及其最早一条记录（ts 升序下的第一行），跳 N 次得 N 个证券。
+    代价是 N+1 次请求（每次只回 1 行；N 是证券数，**不是行数**）。
+
+    :param client: SupabaseRestClient
+    :param cap: 最多遍历多少个（防上游证券数暴增拖垮运行）
+    :return: ([(usc, first_ts)], truncated, error)
+        - truncated=True 表示触到 cap 上限，清单不完整
+    """
+    found = []
+    last = None
+    while len(found) < cap:
+        qs = ("select=%s,ts&order=%s.asc,ts.asc&limit=1"
+              % (SECU_TABLE_CODE_COLUMN, SECU_TABLE_CODE_COLUMN))
+        if last is not None:
+            qs += "&%s=gt.%s" % (SECU_TABLE_CODE_COLUMN, urllib.parse.quote(last, safe=""))
+        try:
+            page = parse_rows(client.query(TABLE, qs, operation="盘点源库证券清单"))
+        except ImportError_ as e:
+            return found, False, str(e)
+        if not page:
+            return found, False, None
+        code = (page[0].get(SECU_TABLE_CODE_COLUMN) or "").strip()
+        if not code or code == last:      # 游标没前进：防上游数据异常时空转
+            return found, False, None
+        found.append((code, page[0].get("ts")))
+        last = code
+    return found, True, None
+
+
+def audit_secu_inventory(client, mapping):
+    """运行开头盘点一次源库存量，把三份名单做差后打进日志（见 docstring 第十二节）
+
+    三份名单各管一段，缺一不可：
+
+        ① 源库 `finv_quote_secu_kline_min`  上游**实际在采**什么（扫描得到，是实测清单）
+        ② 登记表 `finv_quote_secu`          准入名单，决定能不能导出（见第三节）
+        ③ 映射表 `SecuMetaMapping.jsonl`    落点路径要用的 Region/Market（见第五节）
+
+    ① 有而 ② 没有的，就是「上游在采、这边无声漏掉」的证券 —— 本盘点的目的就是把它们
+    **逐只点名**，而不是让它们每轮静默缺席（既不在名单里，日志连一条「跳过」都不会有）。
+
+    盘点失败**不阻断导出**：只记告警，主流程照常。
+    """
+    _log("")
+    _log("===== 源库证券盘点（%s）=====" % TABLE)
+
+    registry, err = fetch_registered_secus(client)
+    if err:
+        _log("⚠️ 登记表 %s 全量查询失败，本次跳过盘点：%s" % (SECU_TABLE, err))
+        return
+    source, truncated, err = scan_source_secus(client)
+    if err:
+        _log("⚠️ 源库清单盘点中断（已扫到 %d 个），以下仅就扫到的部分做差：%s"
+             % (len(source), err))
+    if truncated:
+        _log("⚠️ 已触遍历上限 %d 个，清单不完整 —— 调大 INVENTORY_MAX_SECU 可继续"
+             % INVENTORY_MAX_SECU)
+
+    def fmt_ts(value):
+        try:
+            return datetime.datetime.fromtimestamp(
+                int(value), tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return "?"
+
+    src_codes = set(code for code, _ in source)
+    unregistered = [(c, ts) for c, ts in source if c not in registry]
+    no_tz = [c for c, _ in source if c in registry and not registry[c][2]]
+    ready = [c for c, _ in source if c in registry and registry[c][2]]
+    no_data = [c for c in mapping if c not in src_codes]
+    reg_not_mapped = [c for c in registry if c not in mapping]
+
+    _log("[INFO] 源库有数据 %d 个 / 登记表 %d 行 / 映射表 %d 个；其中可导出 %d 个"
+         % (len(source), len(registry), len(mapping), len(ready)))
+    for code, ts in source:
+        meta = registry.get(code)
+        if meta is None:
+            mark, detail = "[未登记]", "-"
+        else:
+            mark = "[已登记]"
+            detail = "%s/%s %s" % (meta[0] or "?", meta[1] or "?",
+                                   meta[2] or "(timezone 空)")
+        _log("[INFO]   %s %s %s | 最早 %s UTC" % (code, mark, detail, fmt_ts(ts)))
+
+    if unregistered:
+        _log("⚠️ 源库有数据、但 %s 未登记 %d 个 —— 每轮都导不出，逐只点名如下："
+             % (SECU_TABLE, len(unregistered)))
+        for code, ts in unregistered:
+            _log("      %s  最早记录 %s UTC" % (code, fmt_ts(ts)))
+        _log("      ↑ 补 %s 行（usc / region / market / timezone），"
+             "并在 SecuMetaMapping.jsonl 补 Region/Market（落点路径要用）后，下次运行即会导出"
+             % SECU_TABLE)
+    else:
+        _log("[INFO] 源库有数据的证券**全部已登记**，无遗漏")
+
+    if no_tz:
+        _log("⚠️ 已登记但 timezone 为空 %d 个（补上 timezone 即放行）：%s"
+             % (len(no_tz), ", ".join(no_tz)))
+    if reg_not_mapped:
+        _log("⚠️ 已登记但不在映射表 %d 个（取不到 Region/Market，不会被导出）：%s"
+             % (len(reg_not_mapped), ", ".join(reg_not_mapped)))
+    if no_data:
+        _log("⚠️ 映射表有、源库无数据 %d 个（要么上游没采，要么 Code 形态不符）：%s"
+             % (len(no_data), ", ".join(no_data)))
 
 
 def fetch_week_rows(client, usc, start_ts, end_ts, page_size):
@@ -1127,6 +1310,9 @@ def main():
         _log("[INFO] 目标周：%s（全部证券同一周）" % cfg["week_raw"])
     else:
         _log("[INFO] 目标周：未指定 → 逐个证券取其「最早一条记录」所在的周")
+
+    # 逐证券处理之前先盘一次源库存量：把「上游在采、这边名单里没有」的证券逐只点名
+    audit_secu_inventory(client, mapping)
 
     ok, skipped, failed, partial = [], [], [], []
     for i, code in enumerate(codes, 1):
