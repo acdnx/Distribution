@@ -1267,7 +1267,7 @@ def resolve_config():
               os.environ.get("CURR_BRANCH", "") or os.environ.get("GITHUB_REF_NAME", "")).strip() \
         or DEFAULT_BRANCH
 
-    # 留空 = 用映射表里的全部 Code（由 main 载入映射表后补齐）
+    # 留空 = 取登记表 finv_quote_secu 中的全部 usc（由 main 取回登记表后补齐）
     codes = [c.strip() for c in codes_raw.split(",") if c.strip()] or None
 
     page_size_raw = os.environ.get("SUPABASE_PAGE_SIZE", "").strip()
