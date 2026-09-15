@@ -147,7 +147,10 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
 在**确认 .mvsv 已提交成功**之后，可选地把源库中该证券该整周的数据删掉，实现
 「按证券、按周」的数据迁移。开关：
 
-    SUPABASE_ENABLE_DELETE   "true"/"1"/"yes"/"on" 开启；**默认关**（安全模式：只报数不删）
+    SUPABASE_ENABLE_DELETE   "true"/"1"/"yes"/"on" 开启；**本脚本默认关**（安全模式：只报数不删）
+                             —— 但工作流 SupabaseImportWeekMvsv.yml 自 2026-09-15 起默认注入
+                             "true"（含定时触发），故线上默认是**删**；此处默认关只为兜住
+                             「本机裸跑 python3、忘配变量」这一种情况，方向是宁可少删
 
 取值写错（如 "ture"）一律倒向「关」，不会因拼错而意外删库。开关名与语义对齐
 姊妹仓库 ACANX/Distribution 的 SupabaseSyncMvsv.py。
@@ -171,7 +174,7 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
     SUPABASE_KEY           Supabase API 密钥（service-role；必填，不落日志）
     GIT_COMMIT_TOKEN       GitHub 令牌（提交 .mvsv 用；必填）
     SUPABASE_PAGE_SIZE     单页行数（默认 1000）
-    SUPABASE_ENABLE_DELETE 删除源库开关（默认关；见第七节）
+    SUPABASE_ENABLE_DELETE 删除源库开关（脚本默认关、工作流默认开；见第七节）
     SECU_CODE              证券代码，多个以逗号分隔（如 IAU 或 IAU,GLD）；
                            **留空则取 `finv_quote_secu` 登记表中的全部 usc**
     WEEK                   目标周 yyyyWW（可省；省则取该证券「最早一条记录」所在的周）

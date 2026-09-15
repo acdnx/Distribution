@@ -2,12 +2,15 @@ name: SupabaseImportWeekMvsv
 
 on:
   schedule:
-    # 每天 UTC 00:20（北京 08:20）跑一次。目的不是「每天多采一次」，而是**每天交付一批**：
+    # 每天 UTC 16:30（北京次日 00:30）跑一次。目的不是「每天多采一次」，而是**每天交付一批**：
     # 整周数据只在「次周日 00:00 UTC」这一瞬间跨过 14 天线（见脚本 docstring 第二节），
     # 所以周日那次往队列里放入新的一周，其余六天按每日配额把它分批导完
     # （周屏障 + 公平顺序 + 配额，见 docstring 第十三节）。
-    # 触发时刻刻意压在 0:00 之后 20 分钟：任何一只证券等待「新周可导」都不会超过这 20 分钟。
-    - cron: '20 0 * * *'
+    # 注意：GitHub 的 cron 一律按 **UTC** 解释，与仓库时区、运行环境时区都无关
+    # （北京 00:30 = UTC 16:30）。
+    # 时序：周界 = UTC 周日 00:00 = 北京周日 08:00，到本次运行之间隔约 16.5 小时 ——
+    # 新的一周在北京周日早上就已就绪，但要到北京周一凌晨才被首次处理。
+    - cron: '30 16 * * *'
   workflow_dispatch:
     inputs:
       code:
@@ -37,7 +40,7 @@ on:
           - 'false'
           - 'true'
         required: false
-        default: 'false'
+        default: 'true'
 
 permissions:
   contents: write
@@ -70,7 +73,7 @@ jobs:
           echo "证券       : ${{ inputs.code || '(登记表 finv_quote_secu 中的全部)' }}"
           echo "周         : ${{ inputs.week || '(留空 → 每日批次：周屏障 + 公平顺序 + 配额)' }}"
           echo "页面大小   : ${{ inputs.pageSize || '1000' }}"
-          echo "删源库     : ${{ inputs.enableDelete || 'false' }}"
+          echo "删源库     : ${{ inputs.enableDelete || 'true' }}"
           echo "每日配额   : ${DAILY_EXPORT_QUOTA:-(仓库变量未设置 → 脚本用默认值)}"
 
       - name: RunSupabaseImportWeekMvsv
@@ -96,11 +99,14 @@ jobs:
           # 低于它则队列每天还不上、滞后无上限累积。详见 docstring 第十三节。
           DAILY_EXPORT_QUOTA: ${{ vars.DAILY_EXPORT_QUOTA || '10000' }}
           # 导出成功后是否删除源库中对应证券对应周的数据（数据迁移）。
-          # **默认 false**：定时触发无 inputs，恒为 false ⇒ 定时任务永不删库；
-          # 只有手动触发并显式选 true 才会删，且删前会复核「库中现值 == 本次导出的行」。
-          # ACANX 2026-09-15 定：暂不删源库，等稳定后再开启 —— 进度判定不依赖它
-          # （以目标仓库已产出的文件为准，见 docstring 第十三节）。
-          SUPABASE_ENABLE_DELETE: ${{ inputs.enableDelete || 'false' }}
+          # **默认 true（ACANX 2026-09-15 定）**：定时触发无 inputs，回落到 'true' ⇒
+          # **定时任务也会删源库**；手动触发可在界面上显式选 false 退回安全模式。
+          # 删前会复核「库中现值 == 本次导出的行」，不一致即拒绝删除（见 docstring 第七节）。
+          # 注：脚本自身的默认仍是「关」—— 本机裸跑 python3（不注入该变量）不会删库。
+          # 为何要开：`Data/**` 会被 DMDCBWD31MigrationFile 每日采集后从本分支删除，
+          # 落点文件随之消失 ⇒ `list_exported_weeks()` 认不出「这一周已经导过」。
+          # 源库里的删除才是唯一能跨天记住进度的锚点，否则队列会卡在最早一周反复重导。
+          SUPABASE_ENABLE_DELETE: ${{ inputs.enableDelete || 'true' }}
           CURR_BRANCH: ${{ inputs.branch || 'quote' }}
           PYTHONIOENCODING: utf-8
         run: python3 .github/Python/SupabaseImportWeekMvsv.py
