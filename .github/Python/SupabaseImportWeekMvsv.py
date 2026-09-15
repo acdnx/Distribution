@@ -86,12 +86,54 @@ Supabase Data API（PostgREST）默认一次最多回 1000 行，而 7×24 品�
 
 Region / Market **不在表里**，由同目录 SecuMetaMapping.jsonl 按 Code 查得。
 
-六、环境变量（凭据一律经环境注入，严禁写进源码或日志）
+六、同名冲突规避
+----------------------------------------------------------------------------------------
+导出前先**探测目标分支上该文件是否已存在**；已存在则打印日志，并改用 `_N` 后缀规避：
+
+    …/US_ARCA_IAU_MIN_FT_202625.mvsv      常规（不存在时）
+    …/US_ARCA_IAU_MIN_FT_202625_1.mvsv    同名冲突时，N 从 1 起取第一个未占用的
+
+**为什么是「另存」而不是「覆盖」**：commit_content 本身幂等（同路径＝覆盖更新），但覆盖会
+让「上一份导出」无声消失。加后缀后每份导出各自留痕，下游可按 `_N` 分辨先后。
+
+探测走 Contents API 的**目录列举**（一次请求拿到该证券目录下全部文件名），
+而非对 base / `_1` / `_2` … 逐个探测 —— 后者在冲突多时要发 N 次请求。
+
+「已存在」的判定基准是**目标分支当前的 HEAD**。注意 `Data/**` 会被每日的
+DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突，会回到常规命名。
+
+`_1.._99` 全部占用时**报错退出**（不产出文件），避免无声覆盖或无限增长。
+
+七、导出后删源库（数据迁移）
+----------------------------------------------------------------------------------------
+在**确认 .mvsv 已提交成功**之后，可选地把源库中该证券该整周的数据删掉，实现
+「按证券、按周」的数据迁移。开关：
+
+    SUPABASE_ENABLE_DELETE   "true"/"1"/"yes"/"on" 开启；**默认关**（安全模式：只报数不删）
+
+取值写错（如 "ture"）一律倒向「关」，不会因拼错而意外删库。开关名与语义对齐
+姊妹仓库 ACANX/Distribution 的 SupabaseSyncMvsv.py。
+
+删除区间与取数区间**共用同一个 build_week_filter**，杜绝「导出的没删、删的没导出」。
+
+三道闸门（任一不过即**不删**，并计入「部分成功」）：
+
+    1. 提交必须已成功 —— 提交失败时根本走不到这一步；
+    2. **删除前复核**：重查该区间现状，其 ts 集合必须与本次导出的完全一致。
+       多一行（导出后又有新数据写入）或少一行（导出后被别处删过）都拒绝删除 ——
+       **宁可少删，不可错删**；
+    3. **删除后复核**：重查该区间须为空，否则报「未删净」。
+
+`SupabaseRestClient.delete()` 另有一道保险丝：过滤串里必须同时出现 `usc=eq.` 与 `ts` 的
+上下界，缺一即拒绝发请求（PostgREST 允许无过滤 DELETE，那会清空整表）。
+
+八、环境变量（凭据一律经环境注入，严禁写进源码或日志）
 ----------------------------------------------------------------------------------------
     SUPABASE_PROJECT_REF   Supabase 项目引用（必填）
     SUPABASE_KEY           Supabase API 密钥（service-role；必填，不落日志）
     GIT_COMMIT_TOKEN       GitHub 令牌（提交 .mvsv 用；必填）
     SUPABASE_PAGE_SIZE     单页行数（默认 1000）
+    SUPABASE_ENABLE_DELETE 删除源库开关（默认关；见第七节）
     SECU_CODE              证券代码，多个以逗号分隔（如 IAU 或 IAU,GLD）；
                            **留空则取同目录 SecuMetaMapping.jsonl 中的全部 Code**
     WEEK                   目标周 yyyyWW（可省；省则取该证券「最早一条记录」所在的周）
@@ -103,7 +145,7 @@ Region / Market **不在表里**，由同目录 SecuMetaMapping.jsonl 按 Code �
 每个证券**独立处理**：各自一次查询、各自一份文件、各自一次提交；互不影响，单个失败不
 阻断后续证券。
 
-七、usc 探测 = 取最早记录（一查两用）
+九、usc 探测 = 取最早记录（一查两用）
 ----------------------------------------------------------------------------------------
 库里的 usc 若写成「裸码」（IAU）而不是「全码」，查询会返回 0 行 —— 而这与「该周真的没有
 数据」（如国庆长假）产出的**空文件外观完全一致，无法区分**。故在正式取数前先查该证券的
@@ -117,7 +159,7 @@ Region / Market **不在表里**，由同目录 SecuMetaMapping.jsonl 按 Code �
 
 查询语句会打进日志，故 usc 的真实取值形态从首次运行的日志即可读出。
 
-八、日志
+十、日志
 ----------------------------------------------------------------------------------------
 每一行日志都带 `[yyMMdd.HHmmss.SSS]` 时间前缀（毫秒 3 位），便于排查与分析各环节耗时：
 
@@ -132,12 +174,12 @@ Region / Market **不在表里**，由同目录 SecuMetaMapping.jsonl 按 Code �
 故 main() 启动时把 sys.stderr 包一层（_TimestampedStream），只作用于本进程，**不改动该模块
 本身**（它同时被本目录其他脚本复用）。
 
-九、退出码
+十一、退出码
 ----------------------------------------------------------------------------------------
     0 = 全部证券处理完毕（含「该周无数据」→ 产出仅含文件头的空文件；含「自动定周但历史
         尚未攒够 14 天」→ 跳过，两者均属预期状态）
     1 = 致命错误（凭据缺失 / 分支未定 / 映射表缺失）或全部证券失败
-    2 = 部分证券失败（其余成功或跳过）
+    2 = 部分证券失败，或有证券「已导出但源库未删净」（partial）
 
 【环境要求】Python 3.8+，仅标准库；可直连 api.github.com 与 *.supabase.co。
 """
@@ -151,8 +193,11 @@ from decimal import Decimal
 
 # 同目录纯函数库：复用其 HTTP 请求 / 认证头 / 目标仓库与分支解析（纯函数，无副作用）
 from GitHubCommitContent import (
+    DEFAULT_API_BASE,
+    _auth_headers,
     _ensure_console_utf8,
     _request,
+    _resolve_target,
     commit_content,
 )
 
@@ -181,6 +226,11 @@ PROVIDER = "FT"
 # 落点路径模板（见模块 docstring 第五节）
 TARGET_PATH_TEMPLATE = "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s/%s_%s_%s_MIN_FT_%04d%02d.mvsv"
 
+# 同名冲突规避：目标文件已存在时改用 _N 后缀（见 docstring 第六节）
+TARGET_PATH_CONFLICT_TEMPLATE = \
+    "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s/%s_%s_%s_MIN_FT_%04d%02d_%d.mvsv"
+CONFLICT_SUFFIX_MAX = 99
+
 # 周结束距今至少需要的天数（见 docstring 第二节）
 WEEK_END_LAG_DAYS = 14
 
@@ -191,12 +241,37 @@ DEFAULT_PAGE_SIZE = 1000
 # 映射表（与脚本同目录）
 SECU_META_MAPPING_FILE = "SecuMetaMapping.jsonl"
 
+# 删除源库数据的安全开关（见 docstring 第七节）。**默认关**：关时只打印「待删除」清单，
+# 一个字节都不动库。开关名与语义对齐姊妹仓库 ACANX/Distribution 的 SupabaseSyncMvsv.py。
+ENV_ENABLE_DELETE = "SUPABASE_ENABLE_DELETE"
+
 # PostgREST 请求超时（秒）
 HTTP_TIMEOUT = 60
 
 
 class ImportError_(Exception):
     """本工具的业务错误（与内建 ImportError 区分开，避免误捕获）"""
+
+
+# ---------------------------------------------------------------------------
+# 环境变量
+# ---------------------------------------------------------------------------
+
+def env_bool(name, default=False):
+    """读取布尔型环境变量
+
+    只有 "true"/"1"/"yes"/"on"（忽略大小写与首尾空白）算开，其余一律算关 ——
+    即**取值写错时倒向「关」**，不会因为拼错而意外打开删除开关。
+    与姊妹仓库 SupabaseSyncMvsv.py 的同名函数口径一致。
+
+    :param name: 环境变量名
+    :param default: 变量未设置（或为空串）时的返回值
+    :return: 布尔值
+    """
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("true", "1", "yes", "on")
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +571,31 @@ class SupabaseRestClient:
                                % (operation, status, self._redact(url), (text or "")[:300]))
         return text
 
+    def delete(self, table, query_string, operation="删除"):
+        """执行 DELETE，返回响应文本（Prefer: return=minimal，通常为空串）
+
+        **调用方必须保证 query_string 带足过滤条件** —— PostgREST 允许无过滤的
+        DELETE（会清空整表）。本方法内置保险丝：过滤串里必须同时出现 usc=eq. 与
+        ts 的上下界，缺一即拒绝发送请求。
+
+        :raises ImportError_: 过滤串不完整，或网络错误、响应非 2xx
+        """
+        for needle, label in (("usc=eq.", "证券过滤"), ("ts=gte.", "起始时间"),
+                              ("ts=lt.", "结束时间")):
+            if needle not in (query_string or ""):
+                raise ImportError_("拒绝执行无%s的 DELETE（防误删整表）：%s"
+                                   % (label, query_string))
+        url = "%s/%s" % (self.rest_url, urllib.parse.quote(table, safe=""))
+        url = url + "?" + query_string
+        status, text, err = _request("DELETE", url, self._headers(prefer="return=minimal"),
+                                     None, self.timeout)
+        if err:
+            raise ImportError_("%s网络错误：%s（URL %s）" % (operation, err, self._redact(url)))
+        if status is None or not (200 <= status < 300):
+            raise ImportError_("%s失败，HTTP %s，URL %s，响应：%s"
+                               % (operation, status, self._redact(url), (text or "")[:300]))
+        return text
+
 
 def parse_rows(text):
     """解析 PostgREST 响应，**必须用 Decimal 承接小数**，否则高精度值在解析阶段就丢了
@@ -525,11 +625,13 @@ def fetch_week_rows(client, usc, start_ts, end_ts, page_size):
     rows = []
     cursor = None
     page = 0
-    quoted_usc = urllib.parse.quote(usc, safe="")
+    base = build_week_filter(usc, start_ts, end_ts)
     while True:
-        lower = ("ts=gte.%d" % start_ts) if cursor is None else ("ts=gt.%d" % cursor)
-        qs = ("select=%s&usc=eq.%s&%s&ts=lt.%d&order=ts.asc&limit=%d"
-              % (SELECT_COLUMNS, quoted_usc, lower, end_ts, page_size))
+        # 翻页时把游标条件**追加**在后面：PostgREST 对同名列取 AND，
+        # 而 ts > 游标 已经蕴含 ts >= 起点，故与首页条件并存无副作用。
+        lower = "" if cursor is None else ("&ts=gt.%d" % cursor)
+        qs = ("select=%s&%s%s&order=ts.asc&limit=%d"
+              % (SELECT_COLUMNS, base, lower, page_size))
         data = parse_rows(client.query(TABLE, qs, operation="取数第 %d 页" % (page + 1)))
         page += 1
         rows.extend(data)
@@ -538,6 +640,36 @@ def fetch_week_rows(client, usc, start_ts, end_ts, page_size):
             break
         cursor = int(data[-1]["ts"])
     return rows
+
+
+def build_week_filter(usc, start_ts, end_ts):
+    """拼出「某证券 + 某整周」的 PostgREST 过滤串（取数与删除共用同一串）
+
+    取数与删除**必须**用同一个区间，否则会出现「导出的没删、删的没导出」。
+    故这里集中拼一次，两处都调它。
+
+    :param usc: 证券代码
+    :param start_ts: 周起点（含），UTC 秒
+    :param end_ts: 周终点（不含），UTC 秒
+    :return: 查询串（不含前导 "?"）
+    """
+    return ("usc=eq.%s&ts=gte.%d&ts=lt.%d"
+            % (urllib.parse.quote(usc, safe=""), start_ts, end_ts))
+
+
+def delete_week_rows(client, usc, start_ts, end_ts):
+    """删除某证券某整周的全部记录（**不可逆**，只在删除开关开启时才会被调用）
+
+    区间与 fetch_week_rows 完全一致（同一个 build_week_filter）。
+
+    :param client: SupabaseRestClient
+    :param usc: 证券代码
+    :param start_ts: 周起点（含），UTC 秒
+    :param end_ts: 周终点（不含），UTC 秒
+    :raises ImportError_: 网络错误或响应非 2xx
+    """
+    qs = build_week_filter(usc, start_ts, end_ts)
+    client.delete(TABLE, qs, operation="删除 %s 的 [%d, %d)" % (usc, start_ts, end_ts))
 
 
 # ---------------------------------------------------------------------------
@@ -610,10 +742,82 @@ def build_mvsv(rows, code, region, market, fetch_time_text):
     return "\n".join(lines)
 
 
-def build_target_path(region, market, code, iso_year, iso_week):
-    """拼出落点路径（见模块 docstring 第五节）"""
-    return TARGET_PATH_TEMPLATE % (region, market, code, region, market, code,
-                                   iso_year, iso_week)
+def build_target_path(region, market, code, iso_year, iso_week, suffix=None):
+    """拼出落点路径（见模块 docstring 第五节）
+
+    :param suffix: 同名冲突时的规避序号；None = 不加后缀（常规命名）
+    """
+    if suffix is None:
+        return TARGET_PATH_TEMPLATE % (region, market, code, region, market, code,
+                                       iso_year, iso_week)
+    return TARGET_PATH_CONFLICT_TEMPLATE % (region, market, code, region, market, code,
+                                            iso_year, iso_week, suffix)
+
+
+def list_remote_dir(cfg, dir_path):
+    """列出目标分支上某目录下的文件名集合（Contents API GET）
+
+    一次请求拿到整个证券目录的清单，冲突检测与 `_N` 选号都在本地完成，
+    不必对每个候选路径各发一次探测请求。
+
+    :param cfg: 配置 dict（用 branch / token）
+    :param dir_path: 仓库内目录路径（不带前导 /）
+    :return: (names, error)：
+        - names: 文件名集合（目录不存在 → 空集）；失败时为 None
+        - error: 失败原因；成功时为 None
+    """
+    owner, repo, branch = _resolve_target(None, None, cfg["branch"])
+    if not (owner and repo):
+        return None, "未能解析出目标仓库的 owner/repo"
+    url = "%s/%s/%s/contents/%s?ref=%s" % (
+        DEFAULT_API_BASE, owner, repo,
+        urllib.parse.quote(dir_path, safe="/"),
+        urllib.parse.quote(branch, safe=""),
+    )
+    status, text, err = _request("GET", url, _auth_headers(cfg["token"]), None, HTTP_TIMEOUT)
+    if err:
+        return None, "网络错误：%s" % err
+    if status == 404:
+        return set(), None      # 目录还不存在 ⇒ 目录下必然没有任何文件
+    if status != 200:
+        return None, "HTTP %s，响应：%s" % (status, (text or "")[:200])
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None, "响应不是合法 JSON"
+    if not isinstance(data, list):
+        return None, "响应不是目录列表（可能路径指向了文件）"
+    return {item.get("name") for item in data if isinstance(item, dict)}, None
+
+
+def pick_target_path(cfg, region, market, code, iso_year, iso_week):
+    """定落点：目标文件不存在则用常规名，已存在则加 `_N` 后缀规避（docstring 第六节）
+
+    :return: (path_key, suffix, error)：
+        - path_key: 落点路径；失败时为 None
+        - suffix: None = 常规命名；整数 = 本次用的规避序号
+        - error: 失败原因；成功时为 None
+    """
+    base = build_target_path(region, market, code, iso_year, iso_week)
+    dir_path, base_name = base.rsplit("/", 1)
+    names, err = list_remote_dir(cfg, dir_path)
+    if err:
+        return None, None, "列举目标目录失败（%s）：%s" % (dir_path, err)
+
+    if base_name not in names:
+        return base, None, None
+
+    _log("[WARN] 目标文件已存在：%s" % base)
+    _log("[WARN]   → 按同名冲突规避，改用 _N 后缀（N 从 1 起，取第一个未占用的）")
+    stem = base_name[:-len(".mvsv")]
+    for n in range(1, CONFLICT_SUFFIX_MAX + 1):
+        cand_name = "%s_%d.mvsv" % (stem, n)
+        if cand_name not in names:
+            path_key = dir_path + "/" + cand_name
+            _log("[WARN]   → 本次落点：%s" % path_key)
+            return path_key, n, None
+    return None, None, ("目标目录下 %s_1..%s_%d.mvsv 全部已占用，无从规避"
+                        % (stem, stem, CONFLICT_SUFFIX_MAX))
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +853,7 @@ def resolve_config():
         "week_raw": week_raw,
         "branch": branch,
         "page_size": page_size,
+        "enable_delete": env_bool(ENV_ENABLE_DELETE, False),
         "project_ref": os.environ.get("SUPABASE_PROJECT_REF", "").strip(),
         "api_key": os.environ.get("SUPABASE_KEY", "").strip(),
         "token": os.environ.get("GIT_COMMIT_TOKEN", "").strip(),
@@ -699,14 +904,20 @@ def process_one(client, cfg, mapping, code, mapping_path):
 
     start_ts = int(start.timestamp())
     end_ts = int(end.timestamp())
-    path_key = build_target_path(region, market, code, iso_year, iso_week)
 
     _log("[INFO] 证券 %s：Region=%s Market=%s" % (code, region, market))
     _log("[INFO] 目标周 %04dWW%02d：UTC [%s, %s)  ts [%d, %d)"
           % (iso_year, iso_week,
              start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"),
              start_ts, end_ts))
-    _log("[INFO] 落点路径：%s" % path_key)
+
+    # 落点：先探测目标分支上是否已有同名文件，有则改用 _N 后缀规避
+    path_key, conflict_suffix, err = pick_target_path(
+        cfg, region, market, code, iso_year, iso_week)
+    if path_key is None:
+        return "failed", err
+    _log("[INFO] 落点路径：%s%s"
+          % (path_key, "（同名冲突规避 _%d）" % conflict_suffix if conflict_suffix else ""))
 
     rows = fetch_week_rows(client, code, start_ts, end_ts, cfg["page_size"])
     if not rows:
@@ -731,7 +942,72 @@ def process_one(client, cfg, mapping, code, mapping_path):
     )
     if not result.get("success"):
         return "failed", "提交失败：%s" % result.get("message")
-    return "ok", "提交成功（HTTP %s，%s）" % (result.get("http_status"), path_key)
+    export_msg = "提交成功（HTTP %s，%s）" % (result.get("http_status"), path_key)
+
+    # 导出已确认落库，才轮到「删源库」这一步（见 docstring 第七节）
+    delete_msg = purge_source_rows(client, cfg, code, start_ts, end_ts, rows)
+    if delete_msg is None:
+        return "ok", export_msg
+    return "partial", export_msg + "；但" + delete_msg
+
+
+def purge_source_rows(client, cfg, code, start_ts, end_ts, exported_rows):
+    """导出成功后的「删源库」环节
+
+    :param exported_rows: 本次实际导出的行（用于与删除前的现状比对）
+    :return: None = 无需删或已删净；字符串 = 未删/未删净的原因（计入 partial）
+    """
+    if not cfg["enable_delete"]:
+        # 安全模式：只报数，不动库
+        _log("[INFO] 删除开关未开启（%s≠true）—— 本次不删源库数据，仅提示"
+              % ENV_ENABLE_DELETE)
+        if exported_rows:
+            _log("[INFO]   本轮已导出 %d 行，可删未删（开启开关后重跑即会删除）"
+                  % len(exported_rows))
+        return None
+
+    if not exported_rows:
+        _log("[INFO] 该周库中本就无记录，无从删起 —— 跳过删除环节")
+        return None
+
+    _log("[INFO] 删除开关已开启 → 准备删除源库中 %s 的 [%d, %d) 区间数据"
+          % (code, start_ts, end_ts))
+    _log("[INFO] 删除前复核：重查该区间现状，确认与本次导出的行完全一致")
+
+    try:
+        before = fetch_week_rows(client, code, start_ts, end_ts, cfg["page_size"])
+        before_ts = {int(r["ts"]) for r in before}
+        exported_ts = {int(r["ts"]) for r in exported_rows}
+    except ImportError_ as e:
+        return "删除前复核查询失败，**未执行删除**：%s" % e
+
+    if before_ts != exported_ts:
+        only_db = sorted(before_ts - exported_ts)
+        only_file = sorted(exported_ts - before_ts)
+        _log("[ERROR] 复核不通过：库中现值与本次导出的行不一致，**拒绝删除**")
+        _log("[ERROR]   库中如今 %d 行 / 本次导出 %d 行" % (len(before_ts), len(exported_ts)))
+        if only_db:
+            _log("[ERROR]   仅在库中（导出后新写入？）%d 行，如 ts=%s"
+                  % (len(only_db), only_db[:5]))
+        if only_file:
+            _log("[ERROR]   仅在文件中（导出后被删？）%d 行，如 ts=%s"
+                  % (len(only_file), only_file[:5]))
+        _log("[ERROR]   宁可少删不可错删：请人工确认后再决定是否开启删除开关")
+        return ("删除前复核不通过（库中 %d 行 ≠ 导出 %d 行），已拒绝删除以免丢数据"
+                % (len(before_ts), len(exported_ts)))
+
+    try:
+        delete_week_rows(client, code, start_ts, end_ts)
+        _log("[INFO] DELETE 已发出，执行后复核该区间是否已空")
+        after = fetch_week_rows(client, code, start_ts, end_ts, cfg["page_size"])
+    except ImportError_ as e:
+        return "删除请求失败：%s" % e
+
+    if after:
+        return ("删除后该区间仍有 %d 行残留（如 ts=%s），删除未删净"
+                % (len(after), [r.get("ts") for r in after[:5]]))
+    _log("[INFO] 复核通过：该区间已空（删除 %d 行）" % len(before_ts))
+    return None
 
 
 def main():
@@ -777,12 +1053,14 @@ def main():
         return 1
 
     _log("[INFO] 目标分支 = %s" % cfg["branch"])
+    _log("[INFO] 删除源库开关 %s = %s" % (ENV_ENABLE_DELETE,
+                                      "开" if cfg["enable_delete"] else "关（安全模式，只导出不删除）"))
     if cfg["week_raw"]:
         _log("[INFO] 目标周：%s（全部证券同一周）" % cfg["week_raw"])
     else:
         _log("[INFO] 目标周：未指定 → 逐个证券取其「最早一条记录」所在的周")
 
-    ok, skipped, failed = [], [], []
+    ok, skipped, failed, partial = [], [], [], []
     for i, code in enumerate(codes, 1):
         _log("")
         _log("===== [%d/%d] 证券 %s 开始 =====" % (i, len(codes), code))
@@ -796,6 +1074,9 @@ def main():
         elif status == "skipped":
             skipped.append(code)
             _log("⏭️  %s：%s" % (code, message))
+        elif status == "partial":
+            partial.append("%s：%s" % (code, message))
+            _log("⚠️  %s：%s" % (code, message))
         else:
             failed.append(code)
             _log("❌ %s：%s" % (code, message))
@@ -808,7 +1089,12 @@ def main():
     _log("成功 %d 个：%s" % (len(ok), fmt(ok)))
     _log("跳过 %d 个：%s" % (len(skipped), fmt(skipped)))
     _log("失败 %d 个：%s" % (len(failed), fmt(failed)))
+    _log("部分成功（已导出但源库未删净）%d 个：%s" % (len(partial), fmt(partial)))
+    if partial:
+        _log("   ↑ 文件已在分支上，源库数据仍在；排查后重跑即会重试删除环节")
     # 跳过不算失败：属「历史尚未攒够两周」的正常状态
+    if partial:
+        return 2
     if failed and (ok or skipped):
         return 2
     if failed:

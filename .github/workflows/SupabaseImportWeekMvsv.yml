@@ -27,6 +27,14 @@ on:
         type: string
         required: false
         default: '1000'
+      enableDelete:
+        description: 导出成功后删除源库数据（数据迁移；false = 安全模式，只导出不删除）
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -63,6 +71,10 @@ jobs:
           # 目标周：留空则由脚本取该证券「最早一条记录」所在的周
           WEEK: ${{ inputs.week }}
           SUPABASE_PAGE_SIZE: ${{ inputs.pageSize || '1000' }}
+          # 导出成功后是否删除源库中对应证券对应周的数据（数据迁移）。
+          # **默认 false**：定时触发无 inputs，恒为 false ⇒ 定时任务永不删库；
+          # 只有手动触发并显式选 true 才会删，且删前会复核「库中现值 == 本次导出的行」
+          SUPABASE_ENABLE_DELETE: ${{ inputs.enableDelete || 'false' }}
           CURR_BRANCH: ${{ inputs.branch || 'quote' }}
           PYTHONIOENCODING: utf-8
         run: python3 .github/Python/SupabaseImportWeekMvsv.py
