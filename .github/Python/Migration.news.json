@@ -1,3 +1,7 @@
 {
-  "UploadFileListPath": "Branch/news/UploadFileList.jsonl"
+  "UploadFileListPath": "Branch/news/UploadFileList.jsonl",
+  "OBSCIDRoutes": [
+    { "FilePrefix": "Archive/Finv/News/FlashEastMoney/20", "CID": "3518524409277056744" },
+    { "FilePrefix": "Archive/Finv/News/FlashFutu/20", "CID": "3498052827379402513" }
+  ]
 }
