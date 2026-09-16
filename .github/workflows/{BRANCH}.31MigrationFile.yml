@@ -20,7 +20,7 @@ name: DMDCBWD31MigrationFile{BRANCH_PASCAL}
 #      （默认 {BRANCH}；该分支需包含 DMDCBWD31MigrationFile.py 及同目录依赖模块）。
 on:
   schedule:
-    - cron: '{CRON_MIGRATE}'
+    - cron: '15 15 * * *'
   workflow_dispatch:
     inputs:
       branch:
