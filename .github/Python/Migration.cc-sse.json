@@ -1,6 +1,7 @@
 {
-  "UploadFileListPath": "Branch/cc-sse/UploadFileList.jsonl"
-
-
-  3519585883835598316
+  "UploadFileListPath": "Branch/cc-sse/UploadFileList.jsonl",
+  "OBSCIDRoutes": [
+    { "FilePrefix": "Archive/CC/SSE/", "CID": "3519585883835598316" },
+    { "FilePrefix": "Data/Demo/", "CID": "3498052827379402513" }
+  ]
 }
