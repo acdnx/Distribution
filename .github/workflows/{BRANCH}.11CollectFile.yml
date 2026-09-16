@@ -20,7 +20,7 @@ name: DMDCBWD11CollectFile{BRANCH_PASCAL}
 #      （默认 {BRANCH}；该分支需包含 DMDCBWD11CollectFile.py 及同目录依赖模块）。
 on:
   schedule:
-    - cron: '{CRON_COLLECT}'
+    - cron: '14 14 * * *'
   workflow_dispatch:
     inputs:
       branch:
