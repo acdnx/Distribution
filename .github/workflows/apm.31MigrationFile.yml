@@ -1,4 +1,4 @@
-name: DMDCBWD31MigrationFileDatatest
+name: apm.31MigrationFile
 
 on:
   schedule:
@@ -9,7 +9,7 @@ on:
         description: 选择要执行工作流的分支（需包含 .github/Python/DMDCBWD31MigrationFile.py 及同目录依赖模块）
         type: string
         required: false
-        default: datatest
+        default: apm
 
 concurrency:
   group: DMDCBWD31-migration
@@ -22,7 +22,7 @@ jobs:
       # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 datatest
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch || 'datatest' }}
+          ref: ${{ inputs.branch || 'apm' }}
 
       - uses: actions/setup-python@v5
         with:
