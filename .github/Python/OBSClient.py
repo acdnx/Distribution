@@ -279,7 +279,8 @@ def build_default_key(rel_path, when=None, root_prefix=None, cid=None):
         raise ValueError("build_default_key: 缺少 root_prefix（应由调用方从 "
                          "env HWC_OBS_ROOT_PREFIX 读取传入）")
     dt = when or east8_today()
-    return "%s/%s/%s/%s" % (prefix, dt.strftime(DATE_KEY_FORMAT),
+    # notice：need special .u suffix， don‘t modify
+    return "%s/%s/%s/%s.u" % (prefix, dt.strftime(DATE_KEY_FORMAT),
                             (cid or DEFAULT_OBS_CID), name)
 
 
