@@ -1,4 +1,4 @@
-name: DMDCBWD11CollectFileNews
+name: news.11CollectFile
 
 on:
   schedule:
