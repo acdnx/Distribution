@@ -1,4 +1,4 @@
-name: ArchiveUploadFileList
+name: Delete.ArchiveUploadFileList
 
 on:
   schedule:
