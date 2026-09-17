@@ -1,4 +1,4 @@
-name: DMDCBWD31MigrationFileQuote
+name: quote.31MigrationFile
 
 on:
   schedule:
