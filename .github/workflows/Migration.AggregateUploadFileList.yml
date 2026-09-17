@@ -1,4 +1,4 @@
-name: AggregateUploadFileList
+name: Migration.AggregateUploadFileList
 
 on:
   push:
