@@ -1,4 +1,4 @@
-name: DMDCBWD31MigrationFileNews
+name: news.31MigrationFile
 
 on:
   schedule:
