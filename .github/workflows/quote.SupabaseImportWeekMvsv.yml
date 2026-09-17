@@ -1,4 +1,4 @@
-name: SupabaseImportWeekMvsv
+name: quote.SupabaseImportWeekMvsv
 
 on:
   schedule:
