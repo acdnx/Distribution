@@ -25,3 +25,14 @@
 {"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"US","market":"ARCA","usc":"GDX","symbol":"US.GDX"}
 {"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"US","market":"NASDAQ","usc":"QQQ","symbol":"US.QQQ"}
 {"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"US","market":"COMEX","usc":"GCMain","symbol":"CC.GCmain"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"HK","usc":"00700","symbol":"HK.00700"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"HK","usc":"HSIMain","symbol":"HK.HSImain"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"SH","usc":"518880","symbol":"SH.518880"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"SH","usc":"688050","symbol":"SH.688050"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"SH","usc":"600036","symbol":"SH.600036"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"SH","usc":"601288","symbol":"SH.601288"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"SH","usc":"601939","symbol":"SH.601939"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"SZ","usc":"399006","symbol":"SZ.399006"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"SZ","usc":"000001","symbol":"SZ.000001"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"SZ","usc":"300059","symbol":"SZ.300059"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"HK","market":"SZ","usc":"300750","symbol":"SZ.300750"}
