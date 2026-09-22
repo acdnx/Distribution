@@ -21,7 +21,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
-from JobCore import JobExecutionError, _envText, _log, _shortError, _warn
+from JobCore import (JobExecutionError, STANDARD_TYPE_KLINE, _envText, _log,
+                      _shortError, _warn, normalize_period, normalize_type_kline)
 
 ENV_SUPABASE_REF = "SUPABASE_PROJECT_REF"
 
@@ -81,9 +82,6 @@ JOB_ORDER = "order=dt_update.asc,dt_create.asc,id.asc"
 JOB_LIMIT = "limit=1"
 
 
-#: type_kline 标准取值域（大驼峰）；域外写法告警后按首字母大写兜底
-STANDARD_TYPE_KLINE = ("Min", "Min5", "Min10", "Hour", "Hour2", "Hour3", "Hour6",
-                       "Day", "Week", "Month", "Year")
 
 
 # ---------------------------------------------------------------------------
@@ -281,48 +279,8 @@ def build_task_from_job(row: Dict[str, Any], periodOverride: str = "",
     return task
 
 
-def normalize_type_kline(raw: Any) -> str:
-    """把作业表 `type_kline` 归一为**大驼峰**（本脚本全链路唯一出口）
-
-    `MIN` / `min` / `Min` → `Min`；`MIN5` → `Min5`；`HOUR` → `Hour`。
-    该值决定 `.mvsv` 文件名第 4 段、MVSV 头部 `# TypeKLine`、状态回写与日志展示，
-    三处必须一致，故统一从本函数取。
-
-    Args:
-        raw: 作业表原值（大小写不限）。
-
-    Returns:
-        大驼峰文本；空值返回空串。域外写法按首字母大写兜底并告警。
-    """
-    text = str(raw or "").strip()
-    if not text:
-        return ""
-    label = text.capitalize()
-    if label not in STANDARD_TYPE_KLINE:
-        _warn("type_kline=%r 不在标准取值域 %s 内，按大驼峰兜底为 %r；请核对作业表取值"
-              % (raw, "/".join(STANDARD_TYPE_KLINE), label))
-    return label
 
 
-def normalize_period(raw: Any) -> str:
-    """把作业表 `period` 归一为大驼峰（`MON` / `Mon` → `Mon`）
-
-    与 `_periodLabel` 同口径（两者都是 `capitalize()`）；本脚本单独包一层是为了
-    在空值时给出**点名到字段**的错误，而不是等到文件名拼接时才暴露。
-
-    Args:
-        raw: 作业表原值。
-
-    Returns:
-        大驼峰文本。
-
-    Raises:
-        JobExecutionError: 取值为空时抛出（永久性失败：没有 period 无法确定落点路径）。
-    """
-    text = str(raw or "").strip()
-    if not text:
-        raise JobExecutionError("作业表 period 为空，无法确定落点目录与文件名", permanent=True)
-    return text.capitalize()
 
 
 def _nowIso() -> str:
