@@ -19,3 +19,4 @@
 {"type_kline":"MIN","period":"MON","start":20260701,"end":20260801,"label":"202607","region":"US","market":"NASDAQ","usc":"FUTU","symbol":"US.FUTU"}
 {"type_kline":"MIN","period":"MON","start":20260801,"end":20260901,"label":"202608","region":"US","market":"NASDAQ","usc":"FUTU","symbol":"US.FUTU"}
 {"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"US","market":"NASDAQ","usc":"FUTU","symbol":"US.FUTU"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"CC","market":"FTCC","usc":"PAXG","symbol":"CC.PAXG"}
