@@ -1,0 +1,46 @@
+name: quote-mon.31MigrationFile
+
+on:
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 选择要执行工作流的分支（需包含 .github/Python/DMDCBWD31MigrationFile.py 及同目录依赖模块）
+        type: string
+        required: false
+        default: quote-mon
+
+concurrency:
+  group: DMDCBWD31-migration
+  cancel-in-progress: false
+
+jobs:
+  DMDCBWD31MigrationFile:
+    runs-on: ubuntu-latest
+    steps:
+      # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 quote
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || 'quote-mon' }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: RunDMDCBWD31MigrationFile
+        env:
+          # 必填：GitHub 写仓库令牌（下载上传清单 / 回传 UploadSuccessList 到 BranchMigration 用）
+          GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
+          # 必填：华为云 OBS 凭据（真实上传用）
+          HWC_OBS_AK: ${{ secrets.HWC_OBS_AK }}
+          HWC_OBS_SK: ${{ secrets.HWC_OBS_SK }}
+          # 可选：区域/桶（缺省由脚本按 cn-south-1 / gza 默认；配置后覆盖）
+          HWC_OBS_REGION_ID: ${{ vars.HWC_OBS_REGION_ID }}
+          HWC_OBS_BUCKET: ${{ vars.HWC_OBS_BUCKET }}
+          # 必填：OBS 对象 key 前缀（原 Upstream.json 的 OBSRootPrefix，已移出配置文件，改走 Secret）
+          HWC_OBS_ROOT_PREFIX: ${{ secrets.HWC_OBS_ROOT_PREFIX }}
+          # 可选：服务端原生回调端点（原 Upstream.json 的 CallbackUrl，已移出配置文件；
+          #       未设置则不上 x-obs-callback 头，不回调）
+          HWC_OBS_CALLBACK_URL: ${{ secrets.HWC_OBS_CALLBACK_URL }}
+        run: python3 .github/Python/DMDCBWD31MigrationFile.py
