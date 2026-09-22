@@ -1,0 +1,235 @@
+name: MMQuoteCollect
+
+# ============================================================================
+# FTMM 历史 K 线采集作业（作业表驱动）
+# ----------------------------------------------------------------------------
+# 一次运行处理**一条**作业：查 finv_quote_collect_job_ftmm → 挑一条可运行作业
+#   → Moomoo OpenAPI 采集 → 处理成 MVSV → 经 Contents API 落到 quote-mon 的
+#     Archive/Finv/SecuQuoteData/FTMM/{period}/...mvsv → 回写作业状态。
+#
+# 就绪判定：job_status = READY，或 job_status ∈ {FAILED, ABORTED} 且 count_retry < 3。
+# 详见 .github/Python/QuoteCollect/QuoteCollectRunner.py 的模块 docstring。
+#
+# 关于本工作流的定位：**兜底的定时节拍**，不是唯一触发源。
+#   后续会由外部云函数按更高频率调 workflow_dispatch 触发本工作流；因为作业挑选是
+#   幂等的（同一作业重复触发只会重复选中同一落点、重复覆盖同一文件），所以节拍加密
+#   不需要改本文件，也不需要改脚本 —— 云函数只需带上以下 inputs 即可复用同一条链路。
+#
+# ⚠️ GitHub 平台的两个固有特性（已按此设计，不是缺陷）：
+#   1) schedule 在高负载时段可能延迟数分钟到数十分钟，极端情况下会**丢弃**该次触发
+#      —— 由「幂等挑选 + 外部触发」兜住；
+#   2) 仓库连续 60 天无提交活动时，定时工作流会被平台**自动停用**
+#      —— 若长期停更，请到 Actions 页面手动启用。
+#
+# ⚠️ 已知边界：若本作业**恰好卡在 GitHub 的 job 级 timeout 上被强杀**（没有任何
+#   step 的善后能执行，这是平台行为），该作业会短暂停留在 COLLECTING。此时**无需人工
+#   干预**：下一次运行的第 2 步会据「已就绪」规则把它拉回 READY 再继续。
+# ============================================================================
+
+on:
+  schedule:
+    # UTC 20:00 = 北京次日 04:00。与其他三个工作流（UTC 16:30 / 18:00）错峰。
+    # 注意：GitHub 的 cron 一律按 UTC 解释，与仓库时区、运行环境时区都无关。
+    - cron: '0 20 * * *'
+
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 检出分支（需含 .github/Python/QuoteCollect/QuoteCollectRunner.py 及同目录模块）
+        type: string
+        required: false
+        default: quote-mon
+      job_source:
+        description: 作业来源（supabase = 作业表；schedule = 原型 JSONL 调度表，应急对照用）
+        type: choice
+        options:
+          - supabase
+          - schedule
+        required: false
+        default: supabase
+      job_id:
+        description: 指定作业 id（留空 = 按就绪规则自动取一条）
+        type: string
+        required: false
+        default: ''
+      period_override:
+        description: 覆盖落点目录的 period（如 Mon / Week / Day；留空 = 用作业表取值）
+        type: string
+        required: false
+        default: ''
+      usc_override:
+        description: 覆盖标的 usc（如 FUTU；留空 = 用作业表取值）
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: 只采集 + 本地落盘，不推送仓库
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+        required: false
+        default: 'false'
+      commit_branch:
+        description: Contents API 目标分支（落点写入分支）
+        type: string
+        required: false
+        default: quote-mon
+
+permissions:
+  contents: write
+
+concurrency:
+  # 关键：同一时刻只允许一条采集链路在跑。两个并行运行会同时挑中同一条就绪作业
+  # （挑选是"读-改-写"，不是原子认领），并造成状态字段互相覆盖。
+  group: MMQuoteCollect
+  cancel-in-progress: false
+
+jobs:
+  MMQuoteCollect:
+    runs-on: ubuntu-latest
+    # GitHub 单 job 硬上限 6 小时（360 分钟），留 10 分钟余量。
+    # 单条作业的预期时长：月级分钟数据约 90 次请求，远低于该值。
+    timeout-minutes: 350
+
+    env:
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      # 检出后工作树根 = 仓库根。脚本按 __file__ 定位同目录模块与仓库，不依赖检出深度。
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || 'quote-mon' }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      # 先把本次运行的有效参数打进日志：日志自证，避免「改了仓库变量没生效」靠猜
+      - name: 打印运行参数
+        env:
+          JOB_SOURCE: ${{ inputs.job_source || 'supabase' }}
+          JOB_ID: ${{ inputs.job_id }}
+          COMMIT_BRANCH: ${{ inputs.commit_branch || 'quote-mon' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          ENABLE_JOB_UPDATE: ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || 'false' }}
+        run: |
+          echo "触发方式     : ${{ github.event_name }}"
+          echo "检出分支     : ${{ inputs.branch || 'quote-mon' }}"
+          echo "作业来源     : ${JOB_SOURCE}"
+          echo "指定作业 id  : ${JOB_ID:-(留空 → 按就绪规则自动取一条)}"
+          echo "落点分支     : ${COMMIT_BRANCH}"
+          echo "DRY_RUN      : ${DRY_RUN}"
+          echo "状态回写开关 : ${ENABLE_JOB_UPDATE}  (仓库变量 SUPABASE_ENABLE_JOB_UPDATE；false = 只打印待执行 SQL)"
+          echo "周期覆盖     : ${{ inputs.period_override || '(无)' }}"
+          echo "标的覆盖     : ${{ inputs.usc_override || '(无)' }}"
+          echo "作业表判定   : job_status=READY 或 (job_status∈{FAILED,ABORTED} 且 count_retry<3)"
+
+      # 退出码语义（脚本约定）：0 = 成功；1 = 执行失败；2 = 无作业可运行（正常空闲）。
+      # 这里把 2 映射为「成功跳过」，既不把空队列渲染成红色失败，也不掩盖真实失败。
+      - name: 执行采集作业
+        id: collect
+        env:
+          # ---- 作业来源 ----
+          JOB_SOURCE: ${{ inputs.job_source || 'supabase' }}
+          JOB_ID: ${{ inputs.job_id }}
+          JOB_PERIOD_OVERRIDE: ${{ inputs.period_override }}
+          JOB_USC_OVERRIDE: ${{ inputs.usc_override }}
+          # 必填：Supabase 凭据（查询作业表用；表写权限配妥后同一凭据用于状态回写）
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # ---- 落点与推送 ----
+          # 必填：GitHub 写仓库令牌（经 Contents API 提交 .mvsv 到 quote-mon 用）
+          GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
+          COMMIT_BRANCH: ${{ inputs.commit_branch || 'quote-mon' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          # ---- 状态回写总开关 ----
+          # 走**仓库变量**而非 workflow 输入：Settings → Secrets and variables → Actions
+          # → Variables 里改，即时生效，不必改本文件、不必发 PR、也不必重新触发。
+          # 默认为 false（表写权限尚未配妥期间只打印待执行 SQL）；配妥后置 true 即上线。
+          SUPABASE_ENABLE_JOB_UPDATE: ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || 'false' }}
+          # ---- 行情凭据 ----
+          # 必填：Moomoo OpenAPI 凭据（由客户端库自行读取这两个变量名）
+          MOOMOO_OPENAPI_AK: ${{ secrets.MOOMOO_OPENAPI_AK }}
+          MOOMOO_OPENAPI_SK: ${{ secrets.MOOMOO_OPENAPI_SK }}
+          # ---- 运行标识（进日志与提交信息，便于在仓库历史里追溯是哪次运行采的）----
+          JOB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -o pipefail
+          code=0
+          python3 .github/Python/QuoteCollect/QuoteCollectRunner.py || code=$?
+          if [ "$code" -eq 0 ]; then
+            echo "✅ 作业执行成功"
+          elif [ "$code" -eq 2 ]; then
+            echo "⏸️ 作业表中没有可运行作业（READY，或 FAILED/ABORTED 且 count_retry<3）→ 本次空闲，正常结束"
+          else
+            echo "::error::作业执行失败，退出码 $code（详见上方日志与运行摘要）"
+          fi
+          exit "$code"
+
+      # 善后：把残留的 COLLECTING 拉回 READY，避免作业被永久占住。
+      #
+      # 执行条件 `success() || failure()` = 「脚本进程正常终止」（成功或非零退出都算），
+      # 用来排除两种**不该善后**的情形：
+      #   - 运行被取消（cancelled）：状态由下一次运行的就绪规则接管；
+      #   - 进程被强杀（job 级 timeout）：此时任何 step 都不会执行，属平台行为。
+      #
+      # 判定式刻意收窄为 `job_status=eq.COLLECTING`：
+      #   - 脚本已写好终态（COMPLETED / FAILED / ABORTED）时不会被本步骤覆盖；
+      #   - 脚本只走到「重试回退」就异常退出（状态 READY）时也不动它。
+      #
+      # 本步骤仅在 SUPABASE_ENABLE_JOB_UPDATE=true 时生效：开关关闭时脚本本就不会把
+      # 作业写成 COLLECTING（只打印待执行 SQL），用读凭据去写表是多余的越权动作。
+      - name: 善后：作业不得停留在 COLLECTING
+        if: success() || failure()
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ENABLE_JOB_UPDATE: ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || 'false' }}
+          JOB_ID: ${{ steps.collect.outputs.job_id }}
+          JOB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if [ "${ENABLE_JOB_UPDATE}" != "true" ]; then
+            echo "状态回写开关为 ${ENABLE_JOB_UPDATE} → 跳过善后（开关关闭时脚本不会把作业写成 COLLECTING）"
+            exit 0
+          fi
+          if [ -z "${JOB_ID}" ]; then
+            echo "本次未取到作业（或脚本未跑到发布标记）→ 无需善后"
+            exit 0
+          fi
+          echo "检查作业 id=${JOB_ID}（执行前状态 ${{ steps.collect.outputs.job_status }}，重试 ${{ steps.collect.outputs.job_count_retry }}）是否残留 COLLECTING"
+          summary="工作流运行 ${JOB_RUN_ID} 未把作业推进到终态，善后步骤已拉回 READY 以便重试"
+          httpCode="$(curl -sS --max-time 30 -o /tmp/reconcile.json -w '%{http_code}' -X PATCH \
+            "https://${SUPABASE_PROJECT_REF}.supabase.co/rest/v1/finv_quote_collect_job_ftmm?id=eq.${JOB_ID}&job_status=eq.COLLECTING" \
+            -H "apikey: ${SUPABASE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=representation" \
+            --data "{\"job_status\":\"READY\",\"last_error\":\"${summary}\"}")" || httpCode="curl 失败"
+          echo "善后 PATCH HTTP ${httpCode}｜响应：$(cat /tmp/reconcile.json 2>/dev/null || echo '无')"
+          echo "（HTTP 200 且响应为 [] = 该作业不在 COLLECTING，无需善后；这是最常见且正常的结果）"
+
+      - name: 输出运行摘要
+        if: always()
+        env:
+          JOB_ID: ${{ steps.collect.outputs.job_id }}
+          JOB_NAME: ${{ steps.collect.outputs.job_name }}
+          JOB_STATUS: ${{ steps.collect.outputs.job_status }}
+          JOB_COUNT_RETRY: ${{ steps.collect.outputs.job_count_retry }}
+        run: |
+          {
+            echo "### FTMM 采集作业运行结果"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "|---|---|"
+            echo "| 触发方式 | ${{ github.event_name }} |"
+            echo "| 检出分支 | ${{ inputs.branch || 'quote-mon' }} |"
+            echo "| 落点分支 | ${{ inputs.commit_branch || 'quote-mon' }} |"
+            echo "| 作业 id | ${JOB_ID:-(未取到)} |"
+            echo "| 作业名 | ${JOB_NAME:-(未取到)} |"
+            echo "| 执行前状态 | ${JOB_STATUS:-(未知)} |"
+            echo "| 执行前重试 | ${JOB_COUNT_RETRY:-(未知)} |"
+            echo "| 状态回写 | ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || 'false' }} |"
+            echo ""
+            echo "> 状态值即作业表 \`job_status\` 在执行前的取值；执行后的流转见上方步骤日志中的 SQL 计划。"
+          } >> "$GITHUB_STEP_SUMMARY"
