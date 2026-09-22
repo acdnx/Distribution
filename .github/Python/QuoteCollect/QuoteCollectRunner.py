@@ -132,7 +132,7 @@ SQL 与绑定值打印出来（dry-run），不触网写入。表写权限配妥
 【其它】
     JOB_RUN_ID             本次运行标识（默认取 GITHUB_RUN_ID，仅用于日志与提交信息）
 
-【行情库】行情客户端库已提取到同目录 `MoomooOpenAPI.py`（含 Ed25519 / RSA-SHA256 签名与
+【行情库】行情客户端库已提取到同目录 `MoomooQuoteClient.py`（含 Ed25519 / RSA-SHA256 签名与
     纯标准库密码学实现），本脚本只通过其**公共契约**使用；凭据由客户端自行读取下列环境变量：
         MOOMOO_OPENAPI_AK        AppKey ID
         MOOMOO_OPENAPI_SK        Base64 PKCS#8 私钥（或用 MOOMOO_OPENAPI_SK_FILE 指向文件）
@@ -149,7 +149,7 @@ SQL 与绑定值打印出来（dry-run），不触网写入。表写权限配妥
 | `JobCore.py` | 作业公共基础件：`JobExecutionError`、`_log` / `_warn`、环境变量读取、错误摘要、字段归一化（`normalize_type_kline` / `normalize_period`） |
 | `ArchivePublisher.py` | **归档落点发布**：文件名/路径拼装、指纹核算、经 Contents API 推送。本目录内唯一与 GitHub Contents API 耦合的模块 |
 | `MoomooAuth.py` | **moomoo 认证**：请求签名与纯标准库密码学（Ed25519 / RSA-SHA256 / DER）。只做签名、不做取数的调用方可直接复用 |
-| `MoomooOpenAPI.py` | moomoo 客户端库（对外只暴露 `__all__` 所列公共契约） |
+| `MoomooQuoteClient.py` | moomoo 客户端库（对外只暴露 `__all__` 所列公共契约） |
 | `MvsvWriter.py` | MVSV 生成：格式定义、数据模型、文件名生成、序列化 |
 
 依赖方向：
@@ -165,7 +165,7 @@ SQL 与绑定值打印出来（dry-run），不触网写入。表写权限配妥
 `JobCore` 之所以独立成模块，是因为 `SupabaseJobRepo` 与本文件都需要 `_log` / `_warn`
 与 `JobExecutionError`，若放在任一侧都会形成循环导入。它**仅依赖标准库**。
 
-`MoomooOpenAPI` 与 `MvsvWriter` 也各自仅依赖标准库，可被其他模块直接复用。
+`MoomooQuoteClient` 与 `MvsvWriter` 也各自仅依赖标准库，可被其他模块直接复用。
 `SupabaseJobRepo` 是本目录内**唯一**与 PostgREST 耦合的模块：更换作业来源
 （外部调度系统、云函数推任务等）时只需替换它。
 
@@ -217,14 +217,14 @@ for _dir in (_PARENT_DIR, _SCRIPT_DIR):
 #:     1. `JobCore`（同目录）—— 异常 / 日志 / 环境变量 / 字段归一化；
 #:     2. `SupabaseJobRepo`（同目录）—— 作业查询、表行映射、状态回写；
 #:     3. `ArchivePublisher`（同目录）—— 落点路径、指纹、Contents API 推送；
-#:     4. `MoomooOpenAPI`（同目录）—— moomoo 客户端库，仅经其公共契约使用；
+#:     4. `MoomooQuoteClient`（同目录）—— moomoo 客户端库，仅经其公共契约使用；
 #:     5. `MvsvWriter`（同目录）—— MVSV 格式、数据模型与序列化；
 #:     6. `GitHubCommitContent`（上一级目录）—— 由 ArchivePublisher 使用，非本文件直接依赖。
 #: 故本文件不是"拷到哪都能跑"的单文件形态：**需与同目录模块同仓部署**
 #: （在仓库内运行、或按 CI 的检出方式部署均满足）。
 #: 它不依赖仓库根的绝对位置（导入走 sys.path，非相对路径推算）。
 
-from MoomooOpenAPI import (  # noqa: E402  （moomoo 客户端库：仅用公共契约）
+from MoomooQuoteClient import (  # noqa: E402  （moomoo 客户端库：仅用公共契约）
     EXTENDED_TIME_ALL,
     KTYPE_DAY,
     KTYPE_MIN,

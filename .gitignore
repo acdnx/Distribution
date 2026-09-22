@@ -160,7 +160,7 @@ __pycache__/
 
 # 作业实施计划文档：**有意不提交**（作者要求），留作本机内部资料。
 # 与 README.md 同理，精确到路径而非 `Plan-*.md` 通配。
-.github/Python/QuoteCollect/Plan-MMQuoteExportArchive.md
+.github/Python/QuoteCollect/Plan-MMQuoteCollect.md
 
 # 例外：Data/ 下的 .log 是**有意提交**的数据
 # （第 3 行的 *.log 来自 Node 模板；本仓把 Data/ 当数据目录，.log 也是数据格式之一。

@@ -17,7 +17,7 @@ Public contract of this module (everything else is internal):
 
 Everything else -- HTTP transport, endpoint constants, error tables and internal helpers --
 is implementation detail. Names starting with an underscore are internal; they are also
-deliberately left out of __all__ so that `from MoomooOpenAPI import *` exposes the contract
+deliberately left out of __all__ so that `from MoomooQuoteClient import *` exposes the contract
 only.
 
 Credentials are read from the environment and never hard-coded here.

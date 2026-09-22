@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """moomoo OpenAPI 认证：请求签名与纯标准库密码学实现。
 
-从 `MoomooOpenAPI.py` 提取，是本目录内**唯一**与请求签名相关的模块。
+从 `MoomooQuoteClient.py` 提取，是本目录内**唯一**与请求签名相关的模块。
 若某处只需要 moomoo 的请求签名（而不做行情取数），可直接复用本模块，
 无需引入行情客户端。
 
