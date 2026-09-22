@@ -20,3 +20,8 @@
 {"type_kline":"MIN","period":"MON","start":20260801,"end":20260901,"label":"202608","region":"US","market":"NASDAQ","usc":"FUTU","symbol":"US.FUTU"}
 {"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"US","market":"NASDAQ","usc":"FUTU","symbol":"US.FUTU"}
 {"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"CC","market":"FTCC","usc":"PAXG","symbol":"CC.PAXG"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"US","market":"ARCA","usc":"GLD","symbol":"US.GLD"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"US","market":"ARCA","usc":"IAU","symbol":"US.IAU"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"US","market":"ARCA","usc":"GDX","symbol":"US.GDX"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"US","market":"NASDAQ","usc":"QQQ","symbol":"US.QQQ"}
+{"type_kline":"MIN","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"US","market":"COMEX","usc":"GCMain","symbol":"CC.GCmain"}
