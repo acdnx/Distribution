@@ -8,7 +8,7 @@
     MvsvWriter.py         MVSV 生成（格式定义 / 数据模型 / 序列化）
     SupabaseJobRepo.py    Supabase 作业仓库（查询 / 映射 / 状态回写）
     ArchivePublisher.py   归档落点发布（路径 / 指纹 / Contents API 推送）
-    MoomooQuoteClient.py      moomoo 客户端库（契约见其 __all__）
+    MoomooQuoteClient.py  moomoo 客户端库（契约见其 __all__）
     QuoteCollectRunner.py **入口**：编排七个阶段、采集链路、CLI
 
 自下而上：JobCore / MoomooAuth / MvsvWriter 仅依赖标准库，可被其他模块直接复用。

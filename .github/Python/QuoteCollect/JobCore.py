@@ -28,6 +28,7 @@ class JobExecutionError(Exception):
             False = 临时性失败（网络、限流、被中断）→ ABORTED，允许后续重试。
     """
 
+
     def __init__(self, message: str, permanent: bool = False) -> None:
         super().__init__(message)
         self.permanent = permanent

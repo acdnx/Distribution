@@ -11,22 +11,22 @@
       → 调 Moomoo OpenAPI 采集 K 线 → 处理成 MVSV → 经 Contents API 落到 quote-mon 分支
       → 回写作业状态
 
-内联段的来源是原型脚本 `ExportArchiveMvsvInline.py`（**已退役**，不再随仓库提供）：下方标有
-`BEGIN INLINED FROM` / `END INLINED FROM` 的区段即其必需子集的**逐字搬运**。那种「取数与
-数据处理逻辑零重复、本脚本只做作业层」的分工设计由此而来：
+本文件与同目录公共模块共同构成完整实现。它们历史上曾合并在一个自包含原型脚本
+`ExportArchiveMvsvInline.py` 里（**已退役**，不再随仓库提供），此后按**外部耦合边界**逐层拆出：
 
-    - **取数逻辑零重复**：`collectMinuteBars` / `collectDayBars` / `applySessions` /
-      `_deduplicate` / `_periodLabel` 等纯函数来自内联段，本脚本只新增
-      「作业来源、落点、状态流转」；
-    - **MVSV 生成逻辑另立公共模块**：`buildMvsvName` / `writeMvsv` / `toMvsvFieldMap` /
-      数据模型（`KlineMinBar` / `KLineDayBar`）与 MVSV 格式常量已提取到同目录
-      `MvsvWriter.py`，供本脚本与后续其他模块复用（见第三节「依赖」）；
-    - 原型的「随机挑一条调度表任务」入口未被沿用（本脚本的作业来源是作业表或调度表，见第二节）。
+    - **拆出的是外部耦合，不是纯计算**：MVSV 生成 → `MvsvWriter.py`，moomoo 取数 →
+      `MoomooQuoteClient.py`，请求签名 → `MoomooAuth.py`，作业表 → `SupabaseJobRepo.py`，
+      落点推送 → `ArchivePublisher.py`，跨模块公共件 → `JobCore.py`；
+    - **采集链路留在本文件**：`collectMinuteBars` / `collectDayBars` / `applySessions` /
+      `_deduplicate` / `_periodLabel` 等只被本脚本消费、没有第二个消费者，按「不为行数而拆」
+      的原则不再细分；本文件因此只承担「作业来源、采集编排、落点、状态流转」；
+    - 原型的「随机挑一条调度表任务」入口未被沿用（本脚本的作业来源是作业表或调度表，见第二节），
+      但调度表取数路径作为应急通道保留在本文件内（`downloadSchedule` / `pickTask`）。
 
 二、作业来源（JOB_SOURCE）
 ----------------------------------------------------------------------------------------
 - `supabase`（默认）：查 `finv_quote_collect_job_ftmm` 作业表，见第三节「就绪判定」；
-- `schedule`：回退到原型脚本的 JSONL 调度表路径（`downloadSchedule` + `pickTask`），
+- `schedule`：回退到 JSONL 调度表路径（`downloadSchedule` + `pickTask`，逻辑在本文件内），
   用于与作业表对照回归，或作业表不可用时的应急通道。
 
 三、就绪判定与作业选取（query_next_job）
@@ -44,7 +44,7 @@
 
 四、字段口径与 `type_kline` 大驼峰（**强制**）
 ----------------------------------------------------------------------------------------
-作业表 → 原型脚本 task dict 的映射：
+作业表 → 任务 task dict 的映射：
 
     date_start / date_end（INTEGER YYYYMMDD） → start / end
     type_kline（大小写不限）                  → **统一归一为大驼峰**
@@ -132,8 +132,9 @@ SQL 与绑定值打印出来（dry-run），不触网写入。表写权限配妥
 【其它】
     JOB_RUN_ID             本次运行标识（默认取 GITHUB_RUN_ID，仅用于日志与提交信息）
 
-【行情库】行情客户端库已提取到同目录 `MoomooQuoteClient.py`（含 Ed25519 / RSA-SHA256 签名与
-    纯标准库密码学实现），本脚本只通过其**公共契约**使用；凭据由客户端自行读取下列环境变量：
+【行情库】本脚本不直接取数，只通过同目录 `MoomooQuoteClient.py` 的**公共契约**（`__all__`
+    所列）使用行情能力；请求签名与 Ed25519 / RSA-SHA256 密码学实现已进一步拆到 `MoomooAuth.py`，
+    对采集侧不可见。凭据由客户端自行读取下列环境变量：
         MOOMOO_OPENAPI_AK        AppKey ID
         MOOMOO_OPENAPI_SK        Base64 PKCS#8 私钥（或用 MOOMOO_OPENAPI_SK_FILE 指向文件）
 
@@ -147,7 +148,6 @@ SQL 与绑定值打印出来（dry-run），不触网写入。表写权限配妥
 | `ArchivePublisher.py` | **归档落点发布**：文件名/路径拼装、指纹核算、经 Contents API 推送。本目录内唯一与 GitHub Contents API 耦合的模块 |
 | `SupabaseJobRepo.py` | **Supabase 作业仓库**：作业查询、表行 → 任务字典的字段映射与归一化、作业状态回写 |
 | `JobCore.py` | 作业公共基础件：`JobExecutionError`、`_log` / `_warn`、环境变量读取、错误摘要、字段归一化（`normalize_type_kline` / `normalize_period`） |
-| `ArchivePublisher.py` | **归档落点发布**：文件名/路径拼装、指纹核算、经 Contents API 推送。本目录内唯一与 GitHub Contents API 耦合的模块 |
 | `MoomooAuth.py` | **moomoo 认证**：请求签名与纯标准库密码学（Ed25519 / RSA-SHA256 / DER）。只做签名、不做取数的调用方可直接复用 |
 | `MoomooQuoteClient.py` | moomoo 客户端库（对外只暴露 `__all__` 所列公共契约） |
 | `MvsvWriter.py` | MVSV 生成：格式定义、数据模型、文件名生成、序列化 |
@@ -158,7 +158,7 @@ SQL 与绑定值打印出来（dry-run），不触网写入。表写权限配妥
              │                               ├──> JobCore
              ├──> ArchivePublisher ──────────┤
              │        └──> MvsvWriter        │
-             ├──> MoomooOpenAPI ──> MoomooAuth
+             ├──> MoomooQuoteClient ──> MoomooAuth
              └──> MvsvWriter
     MoomooAuth / MvsvWriter / JobCore 均仅依赖标准库
 
@@ -198,7 +198,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 
 # ---------------------------------------------------------------------------
-# 同目录模块与原型脚本复用
+# 同目录模块导入
 # ---------------------------------------------------------------------------
 #: 本脚本所在目录（`.github/Python/QuoteCollect`）。后续按功能拆分出的同目录模块
 #: 由这里进入 sys.path，便于直接 `import <模块名>`。
@@ -313,13 +313,6 @@ ENV_JOB_PERIOD_OVERRIDE = "JOB_PERIOD_OVERRIDE"
 ENV_JOB_USC_OVERRIDE = "JOB_USC_OVERRIDE"
 
 
-
-
-
-
-
-
-
 ENV_COMMIT_TOKEN = "GIT_COMMIT_TOKEN"
 ENV_COMMIT_BRANCH = "COMMIT_BRANCH"
 ENV_COMMIT_OWNER = "COMMIT_OWNER"
@@ -337,35 +330,9 @@ DEFAULT_COMMIT_BRANCH = "quote-mon"
 ENV_ENABLE_JOB_UPDATE = "SUPABASE_ENABLE_JOB_UPDATE"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # 二、取值归一化
 # ---------------------------------------------------------------------------
-
-
-# ===========================================================================
-# 以下为示例自身的逻辑（导出参数、数据处理模型、取数、序列化与 main）
-# ===========================================================================
-
-# -*- coding: utf-8 -*-
-
-
-# 非正式模块导入使用相对路径导入，需要加上以下这一行，正式pypi模块下面这一行可以去掉。
 
 # ---- 导出参数：按需修改 ----
 SCHEDULE_URL = ("https://raw.githubusercontent.com/acdnx/Distribution/refs/heads/quote-mon"
@@ -379,7 +346,6 @@ RETRY_BACKOFF_SECONDS = 30          # 限流重试的退避基数（秒），按
 #: ``MIN`` / ``MIN5`` / ``MIN10`` / ``HOUR`` / ``HOUR2`` / ``HOUR3`` / ``HOUR6`` /
 #: ``DAY`` / ``WEEK`` / ``MONTH`` / ``YEAR``（头部按**大驼峰**输出，如 ``MIN`` → ``Min``）
 KTYPE_BY_TYPE_KLINE: Dict[str, str] = {"MIN": KTYPE_MIN, "DAY": KTYPE_DAY}
-
 
 
 # ---------------------------------------------------------------------------
@@ -410,13 +376,6 @@ CONTINUOUS_TRADING_SUFFIX = "main"
 SERVER_PAGE_LIMIT = 1000
 
 
-
-
-
-
-
-
-
 #: MVSV 时段标识 → 中文说明（仅用于运行日志；时段值本身由 ``KlineMinBar.applySessions``
 #: 按市场写入：美股四档，其他市场留空）
 SESSION_TEXT_LABELS: Dict[str, str] = {
@@ -428,7 +387,7 @@ SESSION_TEXT_LABELS: Dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# 数据模型（原先在 KlineMinBar.py / KLineDayBar.py，此处内联以保持单文件自包含）
+# 美股四时段划分（采集侧专用，与客户端的三档 session 归类口径不同）
 # ---------------------------------------------------------------------------
 #: 美股四时段的划分（标的**本地时间**的分钟数，半开区间 ``[起, 止)``）。
 #: 边界与客户端 ``classifyTradingSession`` 一致（09:30 / 16:00 / 20:00 / 04:00），
@@ -441,10 +400,6 @@ US_SESSION_RANGES = (
 
 #: 夜盘标识（20:00 ~ 次日 04:00，即上表未覆盖的其余时间）
 US_SESSION_OVERNIGHT = "ONT"
-
-
-
-
 
 
 def resolveUsSession(timeInt: int) -> str:
@@ -478,11 +433,6 @@ def applySessions(bars: Iterable[KlineMinBar], isUsMarket: bool) -> None:
     """
     for bar in bars:
         bar.session = resolveUsSession(bar.time) if isUsMarket else ""
-
-
-
-
-
 
 
 def downloadSchedule(url: str) -> List[Dict[str, Any]]:
@@ -819,14 +769,6 @@ def _fillSettlePrice(client: Any, symbol: str, day: str, bars: List[Any]) -> Non
     print(f"（结算价 {settle} 已回填 {len(bars)} 行）", flush=True)
 
 
-
-
-
-
-
-
-
-
 def collectMinuteBars(client: Any, symbol: str, startDate: str, endDate: str,
                       ktype: str) -> List[KlineMinBar]:
     """分钟级任务：逐日取数 → 转 ``KlineMinBar`` → 按任务区间过滤。
@@ -883,12 +825,6 @@ def collectDayBars(client: Any, symbol: str, startDate: str, endDate: str,
     return bars
 
 
-
-
-
-
-
-
 def _periodLabel(task: Dict[str, Any]) -> str:
     """取任务的周期标识**大驼峰**文本，用于文件名第 6 段。
 
@@ -905,8 +841,6 @@ def _periodLabel(task: Dict[str, Any]) -> str:
     return _toPascal(task.get("period"))
 
 
-
-
 def _toDateInt(value: Any) -> int:
     """把日期文本转为 ``YYYYMMDD`` 整数（非法输入返回 0）。
 
@@ -921,8 +855,6 @@ def _toDateInt(value: Any) -> int:
     """
     text = str(value or "").replace("-", "")
     return int(text) if text.isdigit() else 0
-
-
 
 
 def _collectItems(data: Any, merged: Dict[int, Dict[str, Any]]) -> None:
@@ -976,36 +908,6 @@ def _toIsoDate(value: Any) -> str:
     except ValueError as exc:
         raise MoomooOpenAPIException(f"调度表日期无法解析：{value!r}（应为 YYYYMMDD）") from exc
 
-# ===== END INLINED FROM ExportArchiveMvsvInline.py =====
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # ---------------------------------------------------------------------------
 # 六、运行摘要（日志 + GitHub Step Summary）
@@ -1055,7 +957,7 @@ def resolve_job(source: str, jobId: Optional[int],
     Args:
         source: `supabase` 或 `schedule`。
         jobId: 指定作业 id（仅 supabase 来源有效）。
-        scheduleUrl: 调度表 URL（schedule 来源用；空串 = 用原型脚本内置常量）。
+        scheduleUrl: 调度表 URL（schedule 来源用；空串 = 用内置默认常量）。
 
     Returns:
         task dict（supabase 来源带 `_job` 元数据；schedule 来源的 `_job` 为占位空值）。
@@ -1087,9 +989,9 @@ def resolve_job(source: str, jobId: Optional[int],
 
 
 def collect_and_write(task: Dict[str, Any]) -> Optional[Path]:
-    """调原型脚本的取数与处理链路采集数据并落本地 MVSV（复用，不重写）
+    """调本文件的取数与处理链路采集数据并落本地 MVSV
 
-    分流规则与原型 `main()` 完全一致：分钟级逐日取数 + 按时段重写；日/周/月/年级整段取数。
+    分流规则：分钟级逐日取数 + 按时段重写；日 / 周 / 月 / 年级整段取数。
 
     Args:
         task: 已适配的 task dict。
@@ -1406,6 +1308,7 @@ def run_job(args: argparse.Namespace) -> int:
             exitCode = 1
     return exitCode
 
+
 def run_selftest(args: argparse.Namespace) -> int:
     """无凭据自检：验证「字段映射 → 大驼峰归一 → 落点路径 → 状态 SQL → 客户端库契约」纯逻辑链路
 
@@ -1487,7 +1390,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--job-id", type=int, default=_envInt(ENV_JOB_ID),
                         help="指定作业 id（留空 = 按就绪规则自动取一条）")
     parser.add_argument("--schedule-url", default="",
-                        help="schedule 来源的调度表 URL（留空 = 原型脚本内置常量）")
+                        help="schedule 来源的调度表 URL（留空 = 内置默认常量）")
     parser.add_argument("--period-override", default=_envText(ENV_JOB_PERIOD_OVERRIDE),
                         help="覆盖落点目录用的 period（定点重跑用）")
     parser.add_argument("--usc-override", default=_envText(ENV_JOB_USC_OVERRIDE),
@@ -1522,8 +1425,6 @@ def main(argv: Optional[List[str]] = None) -> int:
          % (args.job_source, args.commit_branch, args.commit_owner, args.commit_repo,
             args.dry_run, args.enable_job_update))
     return run_job(args)
-
-
 
 
 if __name__ == "__main__":

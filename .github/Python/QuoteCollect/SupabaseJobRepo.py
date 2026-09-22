@@ -82,8 +82,6 @@ JOB_ORDER = "order=dt_update.asc,dt_create.asc,id.asc"
 JOB_LIMIT = "limit=1"
 
 
-
-
 # ---------------------------------------------------------------------------
 # 三、作业来源：Supabase 作业表
 # ---------------------------------------------------------------------------
@@ -99,6 +97,7 @@ class SupabaseRestClient:
 
     本阶段只用它做两件事：查作业（GET）、回写作业状态（PATCH，受开关控制）。
     """
+
 
     def __init__(self, projectRef: str, apiKey: str, timeout: int = 30) -> None:
         """构造客户端
@@ -117,6 +116,7 @@ class SupabaseRestClient:
         self.apiKey = apiKey
         self.timeout = timeout
 
+
     def _headers(self, withBody: bool = False) -> Dict[str, str]:
         """组装请求头（apikey + Bearer + 可选 JSON 体声明）"""
         headers = {
@@ -127,6 +127,7 @@ class SupabaseRestClient:
         if withBody:
             headers["Content-Type"] = "application/json"
         return headers
+
 
     def _request(self, method: str, table: str, query: str, body: Optional[bytes],
                  prefer: Optional[str] = None) -> Tuple[int, str]:
@@ -151,6 +152,7 @@ class SupabaseRestClient:
         except OSError as exc:
             raise SupabaseRestError("网络错误：%s" % exc) from exc
 
+
     def get(self, table: str, query: str) -> List[Dict[str, Any]]:
         """GET 查询，返回解析后的行列表"""
         status, text = self._request("GET", table, query, None)
@@ -163,6 +165,7 @@ class SupabaseRestClient:
         if not isinstance(data, list):
             raise SupabaseRestError("GET %s 响应不是行数组" % table)
         return [row for row in data if isinstance(row, dict)]
+
 
     def patch(self, table: str, query: str, payload: Dict[str, Any]) -> int:
         """PATCH 更新，返回受影响行数（靠 `Prefer: return=representation` 统计）
@@ -227,9 +230,9 @@ def query_next_job(client: SupabaseRestClient, jobId: Optional[int] = None) -> D
 
 def build_task_from_job(row: Dict[str, Any], periodOverride: str = "",
                         uscOverride: str = "") -> Dict[str, Any]:
-    """把作业表行适配成原型脚本的 task dict（字段映射见模块 docstring 第四节）
+    """把作业表行适配成采集任务的 task dict（字段映射见模块 docstring 第四节）
 
-    产出除原型的 9 个字段外，另带 `_job` 子字典承载作业元数据（id / job_name /
+    产出除采集链路的 9 个字段外，另带 `_job` 子字典承载作业元数据（id / job_name /
     job_status / count_retry），供状态流转与日志追溯；下划线前缀避免与调度表字段重名。
 
     Args:
@@ -253,7 +256,7 @@ def build_task_from_job(row: Dict[str, Any], periodOverride: str = "",
     period = str(periodOverride or "").strip() or str(required("period"))
 
     task: Dict[str, Any] = {
-        # ---- 原型脚本口径（collectMinuteBars / buildMvsvName / writeMvsv 直接消费）----
+        # ---- 采集侧口径（collectMinuteBars / buildMvsvName / writeMvsv 直接消费）----
         "type_kline": normalize_type_kline(required("type_kline")),
         "period": normalize_period(period),
         "start": int(required("date_start")),
@@ -277,10 +280,6 @@ def build_task_from_job(row: Dict[str, Any], periodOverride: str = "",
             "作业 %s 的日期区间非法：date_end(%s) < date_start(%s)"
             % (task["_job"]["job_name"], task["end"], task["start"]), permanent=True)
     return task
-
-
-
-
 
 
 def _nowIso() -> str:
@@ -315,6 +314,7 @@ class JobStateWriter:
     尚未配妥期间的降级形态；开关打开后同一批调用真实生效，调用点代码不变。
     """
 
+
     def __init__(self, client: Optional[SupabaseRestClient], enabled: bool) -> None:
         """构造写入器
 
@@ -328,6 +328,7 @@ class JobStateWriter:
         #: （动机：SQL 混在长日志里容易被淹没，摘要里一眼可见）
         self.sqlPlans: List[str] = []
 
+
     def _plan(self, jobId: Any, action: str, payload: Dict[str, Any]) -> str:
         """渲染一条待执行 SQL（dry-run 打印 + 日志追溯两用）
 
@@ -337,6 +338,7 @@ class JobStateWriter:
                          for key, value in payload.items())
         return "UPDATE %s SET %s WHERE id = %s;  -- %s" % (JOB_TABLE, sets,
                                                            _sqlLiteral(jobId), action)
+
 
     def apply(self, jobId: Any, action: str, payload: Dict[str, Any]) -> bool:
         """执行（或计划）一次状态变更
@@ -366,6 +368,7 @@ class JobStateWriter:
         _log("[状态] %s → id=%s 已更新 %d 行" % (action, jobId, affected))
         return True
 
+
     def mark_ready_rollback(self, job: Dict[str, Any]) -> None:
         """重试回退：把 FAILED/ABORTED 且未耗尽重试的作业置回 READY（第七节）
 
@@ -378,10 +381,12 @@ class JobStateWriter:
         self.apply(job.get("id"), "重试回退 %s → READY" % status,
                    {"job_status": JOB_STATUS_READY, "dt_cancel": None, "cancel_reason": None})
 
+
     def mark_collecting(self, job: Dict[str, Any]) -> None:
         """标记开始采集：COLLECTING + dt_starte"""
         self.apply(job.get("id"), "%s → COLLECTING" % (job.get("job_status") or "READY"),
                    {"job_status": JOB_STATUS_COLLECTING, "dt_starte": _nowIso()})
+
 
     def mark_completed(self, job: Dict[str, Any], remotePath: str, result: Dict[str, Any]) -> None:
         """标记采集完成：COMPLETED + dt_finish，并清空 last_error
@@ -392,6 +397,7 @@ class JobStateWriter:
         self.apply(job.get("id"), "COLLECTING → COMPLETED",
                    {"job_status": JOB_STATUS_COMPLETED, "dt_finish": _nowIso(),
                     "last_error": None, "remark": note})
+
 
     def mark_failed(self, job: Dict[str, Any], error: Optional[BaseException],
                     permanent: bool) -> None:
@@ -409,4 +415,3 @@ class JobStateWriter:
         else:
             self.apply(job.get("id"), "COLLECTING → ABORTED（重试计数保持 %d）" % retry,
                        {"job_status": JOB_STATUS_ABORTED, "last_error": detail})
-

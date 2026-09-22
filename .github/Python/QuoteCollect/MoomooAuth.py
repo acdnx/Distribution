@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+
 class PureCryptoError(Exception):
     """纯标准库密码学模块的异常。
 
@@ -446,6 +447,7 @@ class FutuOpenApiSignatureError(Exception):
         algorithm: 涉及的签名算法（未知时为 None）。
     """
 
+
     def __init__(self, message: str, algorithm: Optional[str] = None) -> None:
         """初始化异常。
 
@@ -471,6 +473,7 @@ class FutuOpenApiSignature:
         algorithm: 识别出的签名算法（``Ed25519`` 或 ``RSA-SHA256``）。
         privateKeyDer: PKCS#8 DER 私钥字节。
     """
+
 
     def __init__(
         self,
@@ -544,6 +547,7 @@ class FutuOpenApiSignature:
                 f"原文长度 {len(text)}，前 12 字符 {text[:12]!r}"
             ) from exc
 
+
     @staticmethod
     def detectAlgorithm(derBytes: bytes) -> str:
         """依据 PKCS#8 DER 内容识别签名算法。
@@ -565,6 +569,7 @@ class FutuOpenApiSignature:
             "无法识别的私钥算法：仅支持 Ed25519（OID 1.3.101.112）"
             "与 RSA（OID 1.2.840.113549.1.1.1）"
         )
+
 
     def setAppKeyId(self, appKeyId: str) -> "FutuOpenApiSignature":
         """设置 AppKey ID（请求头 X-Api-Key）。
@@ -623,6 +628,7 @@ class FutuOpenApiSignature:
         bodyPart = hashlib.sha256(body).hexdigest() if body else ""
         return f"{timestampMs}\n{method}\n{requestPath}\n{query}\n{bodyPart}"
 
+
     @staticmethod
     def generateNonce(length: int = DEFAULT_NONCE_LENGTH) -> str:
         """生成符合官方字符集要求的 ``X-Nonce`` 随机串。
@@ -639,6 +645,7 @@ class FutuOpenApiSignature:
         if not 1 <= length <= 64:
             raise FutuOpenApiSignatureError(f"X-Nonce 长度须在 1-64 之间，当前为 {length}")
         return "".join(secrets.choice(NONCE_ALPHABET) for _ in range(length))
+
 
     @staticmethod
     def bodyDigest(body: Optional[bytes]) -> str:
@@ -680,6 +687,7 @@ class FutuOpenApiSignature:
             signature = self._signRsa(data)
         return base64.b64encode(signature).decode("ascii")
 
+
     def signRequest(
         self,
         httpMethod: str,
@@ -707,6 +715,7 @@ class FutuOpenApiSignature:
         ts = int(timestampMs if timestampMs is not None else time.time() * 1000)
         source = self.buildSignatureSource(ts, httpMethod, requestPath, queryString, body)
         return self.signSource(source), source, ts
+
 
     def buildAuthHeaders(
         self,
@@ -859,6 +868,7 @@ class FutuOpenApiSignature:
                 f"Ed25519 签名失败：{exc}", algorithm=ALGORITHM_ED25519
             ) from exc
 
+
     def _signRsa(self, data: bytes) -> bytes:
         """RSA-SHA256（PKCS#1 v1.5）签名（纯标准库实现，见 ``PureCrypto``）。
 
@@ -900,4 +910,3 @@ def createFutuOpenApiSignature(
     return FutuOpenApiSignature(
         privateKeyText=privateKeyText, appKeyId=appKeyId, algorithm=algorithm
     )
-

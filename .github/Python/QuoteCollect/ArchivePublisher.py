@@ -23,6 +23,7 @@ from GitHubCommitContent import commit_content_file
 from JobCore import _envText, _log, _warn, normalize_period
 from MvsvWriter import buildMvsvName
 
+
 def compute_digest(localFile: Path) -> Tuple[str, int, int]:
     """核算本地文件指纹：sha256 + 字节数 + 行数（上传前后对账用）
 
@@ -114,4 +115,3 @@ ARCHIVE_ROOT_TEMPLATE = "Archive/Finv/SecuQuoteData/FTMM/%s"
 
 #: 运行标识（仅日志与提交信息用）
 ENV_RUN_ID = "JOB_RUN_ID"
-

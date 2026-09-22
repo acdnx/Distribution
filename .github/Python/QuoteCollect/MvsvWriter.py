@@ -158,6 +158,7 @@ class KlineMinBar:
     session: str = ""
     name: Optional[str] = None
 
+
     @classmethod
     def fromKlineBar(cls, bar: Any) -> "KlineMinBar":
         """由客户端 ``KlineBar`` 构造本模型（顺带完成一次性的字段换算）。
@@ -191,6 +192,7 @@ class KlineMinBar:
             name=bar.scName or bar.name,
         )
 
+
     @property
     def hasPrice(self) -> bool:
         """是否含有效价格（四价至少一项非空）。
@@ -201,6 +203,7 @@ class KlineMinBar:
             True 表示含有效价格数据。
         """
         return any(value is not None for value in (self.open, self.high, self.low, self.close))
+
 
     def toDict(self) -> Dict[str, Any]:
         """转为字典（剔除值为 None 的字段，便于直接落盘为 JSONL）。
@@ -273,6 +276,7 @@ class KLineDayBar:
     offsetMinute: int = 0
     name: Optional[str] = None
 
+
     @classmethod
     def fromKlineBar(cls, bar: Any) -> "KLineDayBar":
         """由客户端 ``KlineBar`` 构造本模型（顺带完成一次性的字段换算）。
@@ -310,6 +314,7 @@ class KLineDayBar:
             name=bar.scName or bar.name,
         )
 
+
     @property
     def hasPrice(self) -> bool:
         """是否含有效价格（四价至少一项非空）。
@@ -318,6 +323,7 @@ class KLineDayBar:
             True 表示含有效价格数据。
         """
         return any(value is not None for value in (self.open, self.high, self.low, self.close))
+
 
     def toDict(self) -> Dict[str, Any]:
         """转为字典（剔除值为 None 的字段，便于直接落盘为 JSONL）。
@@ -553,4 +559,3 @@ def _fixed6(value: Optional[float]) -> str:
         形如 ``0.100742`` 的文本或空串。
     """
     return "" if value is None else f"{value:.6f}"
-

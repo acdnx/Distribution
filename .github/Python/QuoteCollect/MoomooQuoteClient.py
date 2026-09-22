@@ -26,10 +26,13 @@ Module layout inside this file (marked by `# 内联：<original module>` comment
 this client library was vendored from an upstream package tree that no longer exists in
 this repository. The section markers name the original upstream modules purely for
 provenance -- they do NOT mean the code is inlined from somewhere else today; this file
-is the only copy. Signature/crypto now lives in the sibling module `MoomooAuth`.
+is the only copy. Two upstream sections carry no marker here because their code has moved
+out to a sibling module: signature construction and the pure-stdlib crypto primitives
+(Ed25519 / RSA-SHA256 / DER) now live in `MoomooAuth`.
 """
 
 import base64
+import datetime as dt
 import hashlib
 import json
 import os
@@ -45,7 +48,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 #: 认证（请求签名 + 纯标准库密码学）已提取到同目录 `MoomooAuth`。
-#: 依赖方向单向：MoomooOpenAPI -> MoomooAuth（后者为纯标准库实现，不反向依赖本模块）。
+#: 依赖方向单向：MoomooQuoteClient -> MoomooAuth（后者为纯标准库实现，不反向依赖本模块）。
 #: 仅需回导签名器与签名异常这两个符号 —— 传输层与客户端门面会用到它们。
 from MoomooAuth import FutuOpenApiSignature, FutuOpenApiSignatureError  # noqa: E402
 
@@ -68,181 +71,9 @@ __all__ = [
 ]
 
 
-# ===== BEGIN INLINED FROM ExportArchiveMvsvInline.py =====
-# 来源：原型脚本 ExportArchiveMvsvInline.py（**已退役**，不再随仓库提供）。
-# 本区段是其必需子集的**逐字搬运**：常量 + 客户端库（Ed25519 / RSA-SHA256 签名、传输层、
-# 历史 K 线接口）；仅挖去原型的 `main()` 与 `if __name__` 入口（由本文件的入口替代）。
-# 内联来源模块清单见本文件开头的模块 docstring。
-#
-# ⚠️ 本区段已**不再包含 MVSV 生成逻辑**：格式定义、数据模型（KlineMinBar / KLineDayBar）、
-#   文件名生成与写文件已提取到同目录公共模块 `MvsvWriter.py`（见本文件上方 import）。
-#   本区段保留的是采集侧的取数与回调逻辑（历史 K 线三接口、传输层、模型转换）。
-#
-# ⚠️ 维护方式：来源文件已退役，**不再有"重新生成"的途径**。
-#   故：A) 本区段**可以**直接编辑，改动即最终生效；B) 请勿期待与任何外部来源保持同步 ——
-#   本内联段是这些实现的**唯一副本**（这同时意味着不再有双副本漂移问题）。
-# -*- coding: utf-8 -*-
-"""归档调度驱动的历史 K 线导出示例（MVSV 输出，**完全自包含单文件版**）。
-
-【自包含范围】本文件**不含任何外部依赖**：除 Python 标准库外不需要任何文件或包——
-不仅两个数据处理模型，连本仓库的 ``MetaIncubator.APIHub.SecurityQuote.MoomooOpenAPI``
-客户端库（含 Ed25519 / RSA-SHA256 签名与纯标准库密码学实现）都已内联进来。
-因此可以直接拷贝本文件到任意目录、云函数或容器中运行，无需 ``src/`` 目录，也无需安装
-任何依赖。
-
-【内联来源】（按依赖顺序原样搬运，未改写逻辑）
-
-| 来源模块 | 内容 |
-| --- | --- |
-| ``Vendor/Futu/PureCrypto.py`` | Ed25519 / RSA-SHA256 与最小 DER 编解码 |
-| ``Vendor/Futu/MoomooOpenAPISignature.py`` | 传统 API Key 签名（原文构造、请求头装配） |
-| ``MoomooOpenAPI/Const.py`` | BaseURL、端点、ktype、时段边界等常量 |
-| ``MoomooOpenAPI/Exception.py`` | ``MoomooOpenAPIException`` |
-| ``MoomooOpenAPI/Model.py`` | ``KlineBar`` / ``TradingDay`` / ``StockBasicInfo`` |
-| ``MoomooOpenAPI/Validator.py`` | 日期参数校验 |
-| ``MoomooOpenAPI/Convert.py`` | 响应转换、时段归类、去重与统计 |
-| ``MoomooOpenAPI/HTTPTransport.py`` | 请求发送、签名装配、错误归类与重试 |
-| ``MoomooOpenAPI/QuoteHistoryKline.py`` | ``getHistoryKline`` / ``fetchHistoryKline`` / ``fetchHistoryKlineFullDay`` |
-| ``MoomooOpenAPI/QuoteServerTime.py`` | ``getServerTime`` / ``fetchServerDrift`` |
-| ``MoomooOpenAPI/QuoteStockBasicInfo.py`` | ``postStockBasicInfo`` / ``fetchStockBasicInfo`` |
-| ``MoomooOpenAPI/QuoteTradingDays.py`` | ``getTradingDays`` / ``fetchTradingDays`` |
-| ``MoomooOpenAPI/ClientFacade.py`` | ``MoomooOpenAPIClient`` / ``createMoomooOpenAPIClient`` |
-| ``KlineMinBar.py`` / ``KLineDayBar.py`` | 两个数据处理模型（MVSV 数据列标准） |
-
-【维护提示】上表列出的是这些实现的**原始出处模块**，仅供溯源——那些源文件与承载它们的
-原型脚本均已退役，本内联段是**当前唯一副本**。直接在本文件内修改即可生效，
-不存在需要同步的"另一份"。
-
-【部署提示】默认输出目录由常量 ``OUTPUT_DIR`` 决定，取值
-``<本文件所在目录>/../../../ZZFS/Finv/Quote``（与原仓库布局一致）；
-作业运行时会被 ``LOCAL_OUTPUT_DIR``（系统临时目录）覆盖，故该默认值仅供独立运行本文件时参考；
-把本文件拷贝到其他位置运行，也请按需修改该常量。
-"""
-
-import base64
-import datetime as dt
-import hashlib
-import json
-import os
-import random
-import re
-import secrets
-import string
-import sys
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-
-
-# ===========================================================================
-# 内联：Vendor/Futu/PureCrypto.py（Ed25519 / RSA-SHA256 纯标准库实现）
-# ===========================================================================
-
-# -*- coding: utf-8 -*-
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# Ed25519（RFC 8032 §5.1）
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# 最小 DER 编解码（只覆盖签名所需的结构）
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# RSA-SHA256（PKCS#1 v1.5）
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-# ===========================================================================
-# 内联：Vendor/Futu/MoomooOpenAPISignature.py（传统 API Key 签名）
-# ===========================================================================
-
-# -*- coding: utf-8 -*-
-
-
-
-# ---------------------------------------------------------------------------
-# 常量
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-#: 官方服务端时间戳偏移阈值（毫秒）
-TIMESTAMP_DRIFT_LIMIT_MS = 5000
-
-#: 签名原文的段数（时间戳 / 方法 / 路径 / 查询串 / 请求体摘要）
-SIGNATURE_SOURCE_SEGMENTS = 5
-
-
-
-
-
-
-
-
 # ===========================================================================
 # 内联：MoomooOpenAPI/Const.py（常量）
 # ===========================================================================
-
-# -*- coding: utf-8 -*-
-
 
 # ---------------------------------------------------------------------------
 # 接入点与请求默认值
@@ -436,9 +267,6 @@ RATE_LIMIT_HINT = "HTTP 429：触发限流，请指数退避后重试（可参�
 # 内联：MoomooOpenAPI/Exception.py（异常）
 # ===========================================================================
 
-# -*- coding: utf-8 -*-
-
-
 
 class MoomooOpenAPIException(Exception):
     """moomoo OpenAPI 调用异常。
@@ -450,6 +278,7 @@ class MoomooOpenAPIException(Exception):
         url: 请求 URL。
         hint: 针对错误码的处理建议（无对应建议时为 None）。
     """
+
 
     def __init__(
         self,
@@ -484,10 +313,6 @@ class MoomooOpenAPIException(Exception):
 # ===========================================================================
 # 内联：MoomooOpenAPI/Model.py（KlineBar 等模型）
 # ===========================================================================
-
-# -*- coding: utf-8 -*-
-
-
 
 
 @dataclass
@@ -551,6 +376,7 @@ class KlineBar:
     settlePrice: Optional[float] = None
     impliedVolatility: Optional[float] = None
 
+
     @property
     def hasPrice(self) -> bool:
         """是否含有效价格（四价至少一项非空）。
@@ -561,6 +387,7 @@ class KlineBar:
             True 表示含有效价格数据。
         """
         return any(value is not None for value in (self.open, self.high, self.low, self.close))
+
 
     def toDict(self) -> Dict[str, Any]:
         """转为字典（剔除值为 None 的字段，便于直接落盘为 JSONL）。
@@ -590,6 +417,7 @@ class TradingDay:
     isHalfDay: bool = False
     year: int = 0
     month: int = 0
+
 
     def toDict(self) -> Dict[str, Any]:
         """转为字典（便于直接落盘 JSONL）。
@@ -642,6 +470,7 @@ class StockBasicInfo:
     stockChildType: Optional[str] = None
     stockOwner: Optional[str] = None
 
+
     def toDict(self) -> Dict[str, Any]:
         """转为字典（剔除值为 None 的字段，便于直接落盘 JSONL）。
 
@@ -654,10 +483,6 @@ class StockBasicInfo:
 # ===========================================================================
 # 内联：MoomooOpenAPI/Validator.py（参数校验）
 # ===========================================================================
-
-# -*- coding: utf-8 -*-
-
-
 
 
 def validateDate(fieldName: str, value: Optional[str]) -> None:
@@ -693,10 +518,6 @@ def validateDate(fieldName: str, value: Optional[str]) -> None:
 # ===========================================================================
 # 内联：MoomooOpenAPI/Convert.py（响应转换与时段归类）
 # ===========================================================================
-
-# -*- coding: utf-8 -*-
-
-
 
 
 def normalizeTimeZoneMinutes(raw: Any) -> int:
@@ -1042,11 +863,6 @@ def _formatDateInt(value: Any) -> Optional[str]:
 # 内联：MoomooOpenAPI/HTTPTransport.py（请求与签名装配）
 # ===========================================================================
 
-# -*- coding: utf-8 -*-
-
-
-
-
 #: 自定义传输层签名：``(path, queryString, headers, bodyBytes) -> (httpStatus, payload)``
 TransportType = Callable[[str, str, Dict[str, str], Optional[bytes]], Tuple[int, Any]]
 
@@ -1065,6 +881,7 @@ class MoomooOpenApiTransport:
         timeout: 默认请求超时（秒）。
         lastSignatureSource: 最近一次成功签名所用的原文（调试用）。
     """
+
 
     def __init__(
         self,
@@ -1137,10 +954,12 @@ class MoomooOpenApiTransport:
         """当前签名器实例（只读）。"""
         return self._signature
 
+
     @property
     def algorithm(self) -> str:
         """当前签名算法标识（``Ed25519`` 或 ``RSA-SHA256``）。"""
         return self._signature.algorithm
+
 
     def derivePublicKeyBase64(self) -> str:
         """派生公钥（SPKI DER 的 Base64），用于与 dashboard 上传的公钥比对。
@@ -1179,6 +998,7 @@ class MoomooOpenApiTransport:
             (key, str(value)) for key, value in params.items() if value is not None
         ]
         return urllib.parse.urlencode(cleaned)
+
 
     def requestApi(
         self,
@@ -1298,6 +1118,7 @@ class MoomooOpenApiTransport:
             ) from exc
         return self._unwrapPayload(path, payload, httpStatus, url, plainPayload)
 
+
     @staticmethod
     def _unwrapPayload(
         path: str, payload: Any, httpStatus: int, url: str, plainPayload: bool = False
@@ -1351,11 +1172,6 @@ class MoomooOpenApiTransport:
 # ===========================================================================
 # 内联：MoomooOpenAPI/QuoteHistoryKline.py（历史 K 线三接口）
 # ===========================================================================
-
-# -*- coding: utf-8 -*-
-
-
-
 
 
 def getHistoryKline(
@@ -1593,13 +1409,8 @@ def fetchHistoryKlineFullDay(
 # 内联：MoomooOpenAPI/QuoteServerTime.py（服务端时间）
 # ===========================================================================
 
-# -*- coding: utf-8 -*-
-
-
-
 #: 响应中可能承载服务端时间戳的字段名（按优先级探测）
 TIMESTAMP_FIELDS = ("server_time_ms", "timestamp_ms", "timestamp", "server_time")
-
 
 
 def getServerTime(client: "MoomooOpenAPIClient", timeout: Optional[int] = None) -> int:
@@ -1671,11 +1482,6 @@ def fetchServerDrift(
 # ===========================================================================
 # 内联：MoomooOpenAPI/QuoteStockBasicInfo.py（标的静态信息）
 # ===========================================================================
-
-# -*- coding: utf-8 -*-
-
-
-
 
 
 def postStockBasicInfo(
@@ -1753,11 +1559,6 @@ def fetchStockBasicInfo(
 # ===========================================================================
 # 内联：MoomooOpenAPI/QuoteTradingDays.py（交易日历）
 # ===========================================================================
-
-# -*- coding: utf-8 -*-
-
-
-
 
 
 def getTradingDays(
@@ -1840,11 +1641,6 @@ def fetchTradingDays(
 # 内联：MoomooOpenAPI/ClientFacade.py（客户端门面与工厂）
 # ===========================================================================
 
-# -*- coding: utf-8 -*-
-
-
-
-
 
 class MoomooOpenAPIClient:
     """moomoo OpenAPI（webapi.moomoo.com）行情网关。
@@ -1864,6 +1660,7 @@ class MoomooOpenAPIClient:
 
     #: 提供者标识
     providerName = "MoomooOpenAPIClient"
+
 
     def __init__(
         self,
@@ -1908,30 +1705,36 @@ class MoomooOpenAPIClient:
         """底层传输层实例（只读）。"""
         return self._transport
 
+
     @property
     def appKeyId(self) -> str:
         """当前 AppKey ID。"""
         return self._transport.appKeyId
+
 
     @property
     def timeout(self) -> int:
         """默认请求超时（秒）。"""
         return self._transport.timeout
 
+
     @property
     def signature(self) -> FutuOpenApiSignature:
         """当前签名器实例（只读）。"""
         return self._transport.signature
+
 
     @property
     def algorithm(self) -> str:
         """当前签名算法标识（``Ed25519`` 或 ``RSA-SHA256``）。"""
         return self._transport.algorithm
 
+
     @property
     def lastSignatureSource(self) -> Optional[str]:
         """最近一次成功签名所用的原文（调试用）。"""
         return self._transport.lastSignatureSource
+
 
     def derivePublicKeyBase64(self) -> str:
         """派生公钥（SPKI DER 的 Base64），用于与 dashboard 上传的公钥比对。
@@ -2016,6 +1819,7 @@ class MoomooOpenAPIClient:
             timeout=timeout,
         )
 
+
     def fetchHistoryKline(
         self,
         symbol: str,
@@ -2041,6 +1845,7 @@ class MoomooOpenAPIClient:
             dropEmpty=dropEmpty,
             timeout=timeout,
         )
+
 
     def fetchHistoryKlineFullDay(
         self,
@@ -2079,6 +1884,7 @@ class MoomooOpenAPIClient:
             self._transport, market=market, start=start, end=end, timeout=timeout
         )
 
+
     def fetchTradingDays(
         self,
         market: str,
@@ -2109,6 +1915,7 @@ class MoomooOpenAPIClient:
         """批量获取标的静态档案原始响应（详见 ``QuoteStockBasicInfo.postStockBasicInfo``）。"""
         return _postStockBasicInfo(self._transport, codeList, timeout=timeout)
 
+
     def fetchStockBasicInfo(
         self,
         codeList: List[str],
@@ -2125,6 +1932,7 @@ class MoomooOpenAPIClient:
     def getServerTime(self, timeout: Optional[int] = None) -> int:
         """获取服务端毫秒时间戳（详见 ``QuoteServerTime.getServerTime``）。"""
         return _getServerTime(self._transport, timeout=timeout)
+
 
     def fetchServerDrift(self, timeout: Optional[int] = None) -> Tuple[int, int, int]:
         """比对本地与服务端时间偏移（详见 ``QuoteServerTime.fetchServerDrift``）。"""
@@ -2169,11 +1977,11 @@ def createMoomooOpenAPIClient(
 
 
 # ---------------------------------------------------------------------------
-# 别名映射（原内联段的收尾处理）
+# 门面内部别名映射
 # ---------------------------------------------------------------------------
-# ClientFacade 原本以 ``from .QuoteHistoryKline import getHistoryKline as _getHistoryKline``
-# 这类形式导入同包函数；本库合成单文件后不再有子模块，故在此补上等价别名，
-# 使门面代码无需改写即可工作。**属内部实现，不应被外部依赖。**
+# 上游 ClientFacade 原本以 ``from .QuoteHistoryKline import getHistoryKline as _getHistoryKline``
+# 这类形式导入同包函数；本库把整棵上游包收拢进单一模块后不再有子模块，
+# 故在此补上等价别名，使门面代码无需改写即可工作。**属内部实现，不应被外部依赖。**
 _fetchHistoryKline = fetchHistoryKline
 _fetchHistoryKlineFullDay = fetchHistoryKlineFullDay
 _getHistoryKline = getHistoryKline
