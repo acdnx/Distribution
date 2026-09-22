@@ -37,4 +37,4 @@
 {"type_kline":"Min","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"CN","market":"SZ","usc":"300059","symbol":"SZ.300059"}
 {"type_kline":"Min","period":"WEEK","start":20260913,"end":20260920,"label":"202638","region":"CN","market":"SZ","usc":"300750","symbol":"SZ.300750"}
 {"type_kline":"Min","period":"DAY","start":20260921,"end":20260922,"label":"20260921","region":"US","market":"COMEX","usc":"GCMain","symbol":"CC.GCmain"}
-{"type_kline":"DAY","period":"Mon","start":20260101,"end":20260901,"label":"20260921","region":"US","market":"COMEX","usc":"GCMain","symbol":"CC.GCmain"}
+{"type_kline":"Day","period":"Mon","start":20260101,"end":20260901,"label":"20260921","region":"US","market":"COMEX","usc":"GCMain","symbol":"CC.GCmain"}
