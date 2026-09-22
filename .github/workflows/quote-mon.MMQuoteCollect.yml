@@ -76,7 +76,7 @@ on:
     #   quote.SupabaseImportWeekMvsv.yml → UTC 16:01
     #   quote.11CollectFile.yml          → UTC 18:00
     # 注意：GitHub 的 cron 一律按 UTC 解释，与仓库时区、运行环境时区都无关。
-    - cron: '0 20 * * *'
+    - cron: '21 * * * *'
 
   workflow_dispatch:
     inputs:
