@@ -146,16 +146,21 @@ SQL 与绑定值打印出来（dry-run），不触网写入。表写权限配妥
 | `QuoteCollectRunner.py`（本文件） | 作业执行器：挑选作业的编排、采集链路（取数策略 / 时段归类 / 区间过滤 / 去重）、落点推送、运行摘要、入口 |
 | `ArchivePublisher.py` | **归档落点发布**：文件名/路径拼装、指纹核算、经 Contents API 推送。本目录内唯一与 GitHub Contents API 耦合的模块 |
 | `SupabaseJobRepo.py` | **Supabase 作业仓库**：作业查询、表行 → 任务字典的字段映射与归一化、作业状态回写 |
-| `JobCore.py` | 作业公共基础件：`JobExecutionError`、`_log` / `_warn`、环境变量读取、错误摘要 |
+| `JobCore.py` | 作业公共基础件：`JobExecutionError`、`_log` / `_warn`、环境变量读取、错误摘要、字段归一化（`normalize_type_kline` / `normalize_period`） |
+| `ArchivePublisher.py` | **归档落点发布**：文件名/路径拼装、指纹核算、经 Contents API 推送。本目录内唯一与 GitHub Contents API 耦合的模块 |
+| `MoomooAuth.py` | **moomoo 认证**：请求签名与纯标准库密码学（Ed25519 / RSA-SHA256 / DER）。只做签名、不做取数的调用方可直接复用 |
 | `MoomooOpenAPI.py` | moomoo 客户端库（对外只暴露 `__all__` 所列公共契约） |
 | `MvsvWriter.py` | MVSV 生成：格式定义、数据模型、文件名生成、序列化 |
 
 依赖方向：
 
-    QuoteCollectRunner ──> SupabaseJobRepo ──> JobCore
-             │                    │
-             ├──> MoomooOpenAPI   └──> (仅标准库)
+    QuoteCollectRunner ──> SupabaseJobRepo ──┐
+             │                               ├──> JobCore
+             ├──> ArchivePublisher ──────────┤
+             │        └──> MvsvWriter        │
+             ├──> MoomooOpenAPI ──> MoomooAuth
              └──> MvsvWriter
+    MoomooAuth / MvsvWriter / JobCore 均仅依赖标准库
 
 `JobCore` 之所以独立成模块，是因为 `SupabaseJobRepo` 与本文件都需要 `_log` / `_warn`
 与 `JobExecutionError`，若放在任一侧都会形成循环导入。它**仅依赖标准库**。
@@ -1183,8 +1188,172 @@ def _publish_run_marker(job: Dict[str, Any]) -> None:
             _warn("写入 GITHUB_ENV 失败（善后步骤将拿不到作业标记）：%s" % exc)
 
 
+def _parse_job(args: argparse.Namespace, state: Dict[str, Any]) -> None:
+    """阶段 1：取作业，并按来源类型准备状态写入器与运行标记。
+
+    - 作业表来源（supabase）：创建 JobStateWriter，开通状态回写；
+    - 调度表来源（schedule）：无作业行可写，明确说明「本次不涉及状态流转」，
+      免得让人误以为「该打印的 SQL 没打印出来」。
+
+    Args:
+        args: 命令行参数。
+        state: 运行状态字典（写入 task / job / writer）。
+    """
+    task = resolve_job(args.job_source, args.job_id, args.schedule_url)
+    job = task["_job"]
+    client = task.get("_client")
+
+    writer = JobStateWriter(None, enabled=False)
+    if client is not None:
+        writer = JobStateWriter(client, enabled=args.enable_job_update)
+        if not args.enable_job_update:
+            _log("状态回写开关 %s=false → 本次只打印待执行 SQL（权限配妥后置 true 即生效）"
+                 % ENV_ENABLE_JOB_UPDATE)
+    else:
+        _log("作业来源 = %s（无作业表客户端）→ 本次不涉及作业状态流转，故无 SQL 计划"
+             % args.job_source)
+
+    # 发布作业标记：即便本进程随后被 job 级 timeout 强杀，善后步骤也能定位到这条作业
+    _publish_run_marker(job)
+
+    state["task"], state["job"], state["writer"] = task, job, writer
+
+
+def _rollback_for_retry(state: Dict[str, Any]) -> None:
+    """阶段 2：重试回退 —— 把 FAILED / ABORTED 且未耗尽重试的作业置回 READY。
+
+    由本仓库脚本负责（外部调度方不参与），回退后随即进入 COLLECTING。
+    """
+    state["writer"].mark_ready_rollback(state["job"])
+
+
+def _print_plan(args: argparse.Namespace, state: Dict[str, Any]) -> None:
+    """阶段 3：解析落点路径并打印本次执行计划（日志自证，便于事后核对）。"""
+    task, job = state["task"], state["job"]
+    remotePath = build_remote_path(task)
+    _log("作业身份：id=%s｜%s" % (job.get("id"), job.get("job_name")))
+    _log("采集范围：%s ｜ %s ~ %s ｜ label=%s"
+         % (task["symbol"], task["start"], task["end"], task["label"]))
+    _log("导出配置：type_kline=%s（大驼峰）｜period=%s｜region=%s｜market=%s｜usc=%s"
+         % (task["type_kline"], task["period"], task["region"], task["market"], task["usc"]))
+    _log("落点路径：%s" % remotePath)
+    state["remotePath"] = remotePath
+
+
+def _mark_collecting(state: Dict[str, Any]) -> None:
+    """阶段 4：标记作业进入 COLLECTING（记录 dt_starte）。"""
+    state["writer"].mark_collecting(state["job"])
+
+
+def _run_collection(state: Dict[str, Any]) -> None:
+    """阶段 5：采集并落盘本地 MVSV。
+
+    Raises:
+        JobExecutionError: 行情接口失败（按可重试性判定永久 / 临时），或区间内无数据。
+    """
+    task = state["task"]
+    try:
+        localPath = collect_and_write(task)
+    except MoomooOpenAPIException as exc:
+        # 限流等可重试形态 → 临时失败（ABORTED），计数值由库内重试策略决定何时耗尽
+        temporary = getattr(exc, "httpStatus", None) is None
+        raise JobExecutionError("行情接口失败：%s" % _shortError(exc),
+                                permanent=not temporary) from exc
+
+    if localPath is None:
+        # 区间内无数据：既非成功也非错误，按中止处理并留下可读原因（不产生空文件）
+        raise JobExecutionError(
+            "作业区间 %s ~ %s 内无任何数据，未生成文件" % (task["start"], task["end"]))
+    state["localPath"] = localPath
+
+
+def _push_archive(args: argparse.Namespace, state: Dict[str, Any]) -> None:
+    """阶段 6：推送落点到仓库归档路径（DRY_RUN 时只核算指纹并打印，不推送）。
+
+    Raises:
+        JobExecutionError: 推送失败（永久性失败 → FAILED）。
+    """
+    localPath, remotePath = state["localPath"], state["remotePath"]
+    if args.dry_run:
+        digest, size, lines = compute_digest(localPath)
+        _log("DRY_RUN=true → 跳过推送。本地文件 %s｜sha256 %s…｜%s 字节｜%d 行"
+             % (localPath.name, digest[:16], format(size, ","), lines))
+        return
+
+    pushResult = push_to_repo(remotePath, localPath, args.commit_owner,
+                              args.commit_repo, args.commit_branch,
+                              make_commit_message(remotePath, state["task"]))
+    if not pushResult.get("success"):
+        raise JobExecutionError(
+            "落点推送失败（HTTP %s）：%s"
+            % (pushResult.get("http_status"), pushResult.get("message")))
+    state["pushResult"] = pushResult
+    state["pushed"] = True
+
+
+def _finish_success(args: argparse.Namespace, state: Dict[str, Any]) -> None:
+    """阶段 7：成功收尾 —— 正式推送成功则标记 COMPLETED；DRY_RUN 不改写状态。"""
+    if state["pushed"]:
+        state["writer"].mark_completed(state["job"], state["remotePath"], state["pushResult"])
+    else:
+        # dry-run：不写 COMPLETED（远端尚无产物），只留计划 SQL 供核对
+        _log("[状态·dry-run] DRY_RUN=true，本次不改写作业状态（远端未落点）")
+
+
+def _emit_run_summary(args: argparse.Namespace, state: Dict[str, Any],
+                      started: datetime, failure: Optional[BaseException]) -> None:
+    """收尾：输出运行摘要（摘要自身失败不影响退出码）。
+
+    Args:
+        args: 命令行参数。
+        state: 运行状态字典。
+        started: 本次运行起始时刻（用于耗时）。
+        failure: 执行期间的异常；None 表示成功。
+    """
+    task = state["task"]
+    job = (task or {}).get("_job") or {}
+    writer = state["writer"]
+    pushResult = state["pushResult"]
+    localPath = state["localPath"]
+    elapsed = (datetime.now() - started).total_seconds()
+    try:
+        emit_summary({
+            "作业来源": args.job_source,
+            "作业 id": job.get("id", "(未取到)"),
+            "作业名": job.get("job_name", "(未取到)"),
+            "作业状态（执行前）": job.get("job_status", "(未知)"),
+            "重试次数（执行前）": job.get("count_retry", "(未知)"),
+            "标的": (task or {}).get("symbol", "(未取到)"),
+            "采集区间": "%s ~ %s" % ((task or {}).get("start", "?"), (task or {}).get("end", "?")),
+            "type_kline（大驼峰）": (task or {}).get("type_kline", "(未取到)"),
+            "落点路径": state["remotePath"] or "(未生成)",
+            "本地文件": str(localPath) if localPath else "(未生成)",
+            "推送": "已推送" if state["pushed"] else ("DRY_RUN 跳过" if args.dry_run else "未推送"),
+            "推送 HTTP": pushResult.get("http_status", "-"),
+            "推送 sha256": (pushResult.get("digest") or "")[:16] or "-",
+            "字节数": format(pushResult["size"], ",") if pushResult.get("size") else "-",
+            "行数": pushResult.get("lines", "-"),
+            "状态回写": "已启用" if args.enable_job_update else "dry-run（仅打印 SQL）",
+            "状态回写失败": "; ".join(writer.failures) if writer.failures else "无",
+            "状态变更 SQL 计划": ("\n".join("  %d. %s" % (i, s)
+                                            for i, s in enumerate(writer.sqlPlans, 1))
+                                  if writer.sqlPlans
+                                  else "（本次无状态流转）"),
+            "耗时": "%.1f 秒" % elapsed,
+            "结果": "成功" if failure is None else "失败",
+            "失败摘要": _shortError(failure) if failure is not None else "-",
+        })
+    except Exception as exc:  # noqa: BLE001
+        # 摘要输出失败不得影响退出码，更不得掩盖真正的失败原因
+        _warn("输出运行摘要失败：%s" % _shortError(exc))
+
+
 def run_job(args: argparse.Namespace) -> int:
-    """执行一条作业：查询 → 采集 → 本地落盘 → 推送 → 状态流转
+    """执行一条作业：查询 → 采集 → 本地落盘 → 推送 → 状态流转（**仅编排**）。
+
+    本函数只做**编排**：七个阶段各自独立成函数（见上方 `_parse_job` 等），
+    异常收口集中在此处的 try/except/finally —— 保证「任何异常都被收口成作业状态，
+    不留悬挂态」这一约束在结构上成立。
 
     Args:
         args: 命令行参数。
@@ -1193,146 +1362,49 @@ def run_job(args: argparse.Namespace) -> int:
         进程退出码：0 = 成功；2 = 无作业可运行（正常空闲，非错误）；1 = 执行失败。
     """
     started = datetime.now()
-    writer = JobStateWriter(None, enabled=False)
-    task: Optional[Dict[str, Any]] = None
-    localPath: Optional[Path] = None
-    remotePath = ""
-    pushResult: Dict[str, Any] = {}
-    pushed = False
-    failure: Optional[BaseException] = None
-    permanent = False
-
     #: 退出码：0 = 成功；2 = 无作业可运行（正常空闲）；1 = 执行失败。
     #: 刻意用变量而非在 `finally` 里 `return` — `finally` 中的 return 会吞掉传播中的异常，
     #: 把真正的错误掩盖成「退出码 1」，且 Python 会给出 SyntaxWarning。
     exitCode = 0
+    failure: Optional[BaseException] = None
+    permanent = False
+
+    #: 阶段间共享的运行状态。用字典显式传递，避免每个阶段都塞进 8 个出参。
+    state: Dict[str, Any] = {
+        "task": None, "job": {}, "writer": JobStateWriter(None, enabled=False),
+        "remotePath": "", "localPath": None, "pushResult": {}, "pushed": False,
+    }
 
     try:
-        # ---- 1) 取作业（作业表就绪规则 / 调度表回退）----
-        task = resolve_job(args.job_source, args.job_id, args.schedule_url)
-        job = task["_job"]
-        client = task.get("_client")
-
-        # 状态写入器：正式来源才开通回写（schedule 来源无作业行可写）
-        if client is not None:
-            writer = JobStateWriter(client, enabled=args.enable_job_update)
-            if not args.enable_job_update:
-                _log("状态回写开关 %s=false → 本次只打印待执行 SQL（权限配妥后置 true 即生效）"
-                     % ENV_ENABLE_JOB_UPDATE)
-        else:
-            # 调度表来源没有作业表客户端，状态流转不适用 —— 明确说明，
-            # 免得让人误以为「该打印的 SQL 没打印出来」
-            _log("作业来源 = %s（无作业表客户端）→ 本次不涉及作业状态流转，故无 SQL 计划"
-                 % args.job_source)
-
-        # 发布作业标记：即便本进程随后被 job 级 timeout 强杀，善后步骤也能定位到这条作业
-        _publish_run_marker(job)
-
-        # ---- 2) 重试回退：FAILED/ABORTED → READY（本脚本负责）----
-        writer.mark_ready_rollback(job)
-
-        # ---- 3) 解析范围与导出配置，打印出来（日志自证）----
-        remotePath = build_remote_path(task)
-        _log("作业身份：id=%s｜%s" % (job.get("id"), job.get("job_name")))
-        _log("采集范围：%s ｜ %s ~ %s ｜ label=%s"
-             % (task["symbol"], task["start"], task["end"], task["label"]))
-        _log("导出配置：type_kline=%s（大驼峰）｜period=%s｜region=%s｜market=%s｜usc=%s"
-             % (task["type_kline"], task["period"], task["region"], task["market"], task["usc"]))
-        _log("落点路径：%s" % remotePath)
-
-        # ---- 4) 标记 COLLECTING ----
-        writer.mark_collecting(job)
-
-        # ---- 5) 采集 + 本地落盘 ----
-        try:
-            localPath = collect_and_write(task)
-        except MoomooOpenAPIException as exc:
-            # 限流等可重试形态 → 临时失败（ABORTED），计数值由库内重试策略决定何时耗尽
-            temporary = getattr(exc, "httpStatus", None) is None
-            raise JobExecutionError("行情接口失败：%s" % _shortError(exc),
-                                    permanent=not temporary) from exc
-
-        if localPath is None:
-            # 区间内无数据：既非成功也非错误，按中止处理并留下可读原因（不产生空文件）
-            raise JobExecutionError(
-                "作业区间 %s ~ %s 内无任何数据，未生成文件" % (task["start"], task["end"]))
-
-        # ---- 6) 推送落点 ----
-        if args.dry_run:
-            digest, size, lines = compute_digest(localPath)
-            _log("DRY_RUN=true → 跳过推送。本地文件 %s｜sha256 %s…｜%s 字节｜%d 行"
-                 % (localPath.name, digest[:16], format(size, ","), lines))
-        else:
-            pushResult = push_to_repo(remotePath, localPath, args.commit_owner,
-                                      args.commit_repo, args.commit_branch,
-                                      make_commit_message(remotePath, task))
-            if not pushResult.get("success"):
-                raise JobExecutionError(
-                    "落点推送失败（HTTP %s）：%s"
-                    % (pushResult.get("http_status"), pushResult.get("message")))
-            pushed = True
-
-        # ---- 7) 成功收尾 ----
-        if pushed:
-            writer.mark_completed(job, remotePath, pushResult)
-        else:
-            # dry-run：不写 COMPLETED（远端尚无产物），只留计划 SQL 供核对
-            _log("[状态·dry-run] DRY_RUN=true，本次不改写作业状态（远端未落点）")
-
+        _parse_job(args, state)                       # 1) 取作业 + 准备写入器
+        _rollback_for_retry(state)                    # 2) FAILED/ABORTED → READY
+        _print_plan(args, state)                      # 3) 解析落点并打印执行计划
+        _mark_collecting(state)                       # 4) 标记 COLLECTING
+        _run_collection(state)                        # 5) 采集 + 本地落盘
+        _push_archive(args, state)                    # 6) 推送落点
+        _finish_success(args, state)                  # 7) 成功收尾
     except JobExecutionError as exc:
         failure, permanent = exc, exc.permanent
     except BaseException as exc:  # noqa: BLE001  （任何异常都必须收口成作业状态，不留悬挂态）
         failure, permanent = exc, False
     finally:
-        if failure is not None and task is not None:
+        if failure is not None and state["task"] is not None:
             _warn("作业执行失败：%s（%s）"
                   % (_shortError(failure), "永久性失败 → FAILED" if permanent
                      else "临时性失败 → ABORTED"))
             try:
-                writer.mark_failed(task["_job"], failure, permanent)
+                state["writer"].mark_failed(state["job"], failure, permanent)
             except Exception as exc:  # noqa: BLE001  （状态回写自身再失败也不能吞掉原始错误）
                 _warn("状态回写过程异常：%s" % _shortError(exc))
 
-        elapsed = (datetime.now() - started).total_seconds()
-        job = (task or {}).get("_job") or {}
-        try:
-            emit_summary({
-                "作业来源": args.job_source,
-                "作业 id": job.get("id", "(未取到)"),
-                "作业名": job.get("job_name", "(未取到)"),
-                "作业状态（执行前）": job.get("job_status", "(未知)"),
-                "重试次数（执行前）": job.get("count_retry", "(未知)"),
-                "标的": (task or {}).get("symbol", "(未取到)"),
-                "采集区间": "%s ~ %s" % ((task or {}).get("start", "?"), (task or {}).get("end", "?")),
-                "type_kline（大驼峰）": (task or {}).get("type_kline", "(未取到)"),
-                "落点路径": remotePath or "(未生成)",
-                "本地文件": str(localPath) if localPath else "(未生成)",
-                "推送": "已推送" if pushed else ("DRY_RUN 跳过" if args.dry_run else "未推送"),
-                "推送 HTTP": pushResult.get("http_status", "-"),
-                "推送 sha256": (pushResult.get("digest") or "")[:16] or "-",
-                "字节数": format(pushResult["size"], ",") if pushResult.get("size") else "-",
-                "行数": pushResult.get("lines", "-"),
-                "状态回写": "已启用" if args.enable_job_update else "dry-run（仅打印 SQL）",
-                "状态回写失败": "; ".join(writer.failures) if writer.failures else "无",
-                "状态变更 SQL 计划": ("\n".join("  %d. %s" % (i, s)
-                                                for i, s in enumerate(writer.sqlPlans, 1))
-                                      if writer.sqlPlans
-                                      else "（本次无状态流转）"),
-                "耗时": "%.1f 秒" % elapsed,
-                "结果": "成功" if failure is None else "失败",
-                "失败摘要": _shortError(failure) if failure is not None else "-",
-            })
-        except Exception as exc:  # noqa: BLE001
-            # 摘要输出失败不得影响退出码，更不得掩盖真正的失败原因
-            _warn("输出运行摘要失败：%s" % _shortError(exc))
+        _emit_run_summary(args, state, started, failure)
 
         # 无作业可运行属正常空闲（退出码 2），工作流据此判定「跳过」而非告警
-        if isinstance(failure, JobExecutionError) and not task:
+        if isinstance(failure, JobExecutionError) and state["task"] is None:
             exitCode = 2
         elif failure is not None:
             exitCode = 1
     return exitCode
-
 
 def run_selftest(args: argparse.Namespace) -> int:
     """无凭据自检：验证「字段映射 → 大驼峰归一 → 落点路径 → 状态 SQL → 客户端库契约」纯逻辑链路
