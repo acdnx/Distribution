@@ -4962,6 +4962,11 @@ def run_job(args: argparse.Namespace) -> int:
     failure: Optional[BaseException] = None
     permanent = False
 
+    #: 退出码：0 = 成功；2 = 无作业可运行（正常空闲）；1 = 执行失败。
+    #: 刻意用变量而非在 `finally` 里 `return` — `finally` 中的 return 会吞掉传播中的异常，
+    #: 把真正的错误掩盖成「退出码 1」，且 Python 会给出 SyntaxWarning。
+    exitCode = 0
+
     try:
         # ---- 1) 取作业（作业表就绪规则 / 调度表回退）----
         task = resolve_job(args.job_source, args.job_id, args.schedule_url)
@@ -5050,39 +5055,43 @@ def run_job(args: argparse.Namespace) -> int:
 
         elapsed = (datetime.now() - started).total_seconds()
         job = (task or {}).get("_job") or {}
-        emit_summary({
-            "作业来源": args.job_source,
-            "作业 id": job.get("id", "(未取到)"),
-            "作业名": job.get("job_name", "(未取到)"),
-            "作业状态（执行前）": job.get("job_status", "(未知)"),
-            "重试次数（执行前）": job.get("count_retry", "(未知)"),
-            "标的": (task or {}).get("symbol", "(未取到)"),
-            "采集区间": "%s ~ %s" % ((task or {}).get("start", "?"), (task or {}).get("end", "?")),
-            "type_kline（大驼峰）": (task or {}).get("type_kline", "(未取到)"),
-            "落点路径": remotePath or "(未生成)",
-            "本地文件": str(localPath) if localPath else "(未生成)",
-            "推送": "已推送" if pushed else ("DRY_RUN 跳过" if args.dry_run else "未推送"),
-            "推送 HTTP": pushResult.get("http_status", "-"),
-            "推送 sha256": (pushResult.get("digest") or "")[:16] or "-",
-            "字节数": format(pushResult["size"], ",") if pushResult.get("size") else "-",
-            "行数": pushResult.get("lines", "-"),
-            "状态回写": "已启用" if args.enable_job_update else "dry-run（仅打印 SQL）",
-            "状态回写失败": "; ".join(writer.failures) if writer.failures else "无",
-            "状态变更 SQL 计划": ("\n".join("  %d. %s" % (i, s)
-                                            for i, s in enumerate(writer.sqlPlans, 1))
-                                  if writer.sqlPlans
-                                  else "（本次无状态流转）"),
-            "耗时": "%.1f 秒" % elapsed,
-            "结果": "成功" if failure is None else "失败",
-            "失败摘要": _shortError(failure) if failure is not None else "-",
-        })
+        try:
+            emit_summary({
+                "作业来源": args.job_source,
+                "作业 id": job.get("id", "(未取到)"),
+                "作业名": job.get("job_name", "(未取到)"),
+                "作业状态（执行前）": job.get("job_status", "(未知)"),
+                "重试次数（执行前）": job.get("count_retry", "(未知)"),
+                "标的": (task or {}).get("symbol", "(未取到)"),
+                "采集区间": "%s ~ %s" % ((task or {}).get("start", "?"), (task or {}).get("end", "?")),
+                "type_kline（大驼峰）": (task or {}).get("type_kline", "(未取到)"),
+                "落点路径": remotePath or "(未生成)",
+                "本地文件": str(localPath) if localPath else "(未生成)",
+                "推送": "已推送" if pushed else ("DRY_RUN 跳过" if args.dry_run else "未推送"),
+                "推送 HTTP": pushResult.get("http_status", "-"),
+                "推送 sha256": (pushResult.get("digest") or "")[:16] or "-",
+                "字节数": format(pushResult["size"], ",") if pushResult.get("size") else "-",
+                "行数": pushResult.get("lines", "-"),
+                "状态回写": "已启用" if args.enable_job_update else "dry-run（仅打印 SQL）",
+                "状态回写失败": "; ".join(writer.failures) if writer.failures else "无",
+                "状态变更 SQL 计划": ("\n".join("  %d. %s" % (i, s)
+                                                for i, s in enumerate(writer.sqlPlans, 1))
+                                      if writer.sqlPlans
+                                      else "（本次无状态流转）"),
+                "耗时": "%.1f 秒" % elapsed,
+                "结果": "成功" if failure is None else "失败",
+                "失败摘要": _shortError(failure) if failure is not None else "-",
+            })
+        except Exception as exc:  # noqa: BLE001
+            # 摘要输出失败不得影响退出码，更不得掩盖真正的失败原因
+            _warn("输出运行摘要失败：%s" % _shortError(exc))
 
         # 无作业可运行属正常空闲（退出码 2），工作流据此判定「跳过」而非告警
         if isinstance(failure, JobExecutionError) and not task:
-            return 2
-        if failure is not None:
-            return 1
-    return 0
+            exitCode = 2
+        elif failure is not None:
+            exitCode = 1
+    return exitCode
 
 
 def run_selftest(args: argparse.Namespace) -> int:
