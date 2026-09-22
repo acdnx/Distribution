@@ -1,6 +1,7 @@
 {
-  "UploadFileListPath": "Branch/quote/UploadFileList.jsonl",
+  "UploadFileListPath": "Branch/quote-mon/UploadFileList.jsonl",
   "OBSCIDRoutes": [
+    { "FilePrefix": "Archive/Finv/SecuQuoteMonth/FT/", "CID": "3518524409277056744" },
     { "FilePrefix": "Data/Finv/SecuQuoteWeek/FT/", "CID": "3518524409277056744" },
     { "FilePrefix": "Data/Demo/", "CID": "3498052827379402513" }
   ]
