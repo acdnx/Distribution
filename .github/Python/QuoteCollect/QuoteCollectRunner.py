@@ -71,15 +71,15 @@
 
 六、落点写入（GitHub Contents API）
 ----------------------------------------------------------------------------------------
-**直接调用同目录既有封装** `GitHubCommitContent.commit_content_file`（**刻意不内联**：它是
-仓库既有的公共模块，复制一份只会带来两份实现漂移）：流程为「GET 查 sha → PUT 提交」，
-404 视为新建（HTTP 201）、已存在则更新（HTTP 200）；失败以 dict 返回、不抛异常。
+**已提取到同目录 `ArchivePublisher.py`**（本目录内唯一与 Contents API 耦合的模块）：
+它经由仓库既有的公共封装 `GitHubCommitContent.commit_content_file` 提交，流程为
+「GET 查 sha → PUT 提交」，404 视为新建（HTTP 201）、已存在则更新（HTTP 200）；
+失败以 dict 返回、不抛异常。
 
-调用方式与封装的默认解析链：
-
-    - 目标仓库/分支由 `COMMIT_OWNER` / `COMMIT_REPO` / `COMMIT_BRANCH` **显式传入**，
-      三者齐备时封装**不会**去读 Commit.json 或 `.git`（自包含部署无需这些文件）；
-    - 其余能力沿用封装：分块重试、失败原因归类等。
+本文件只负责调用 `ArchivePublisher.push_to_repo`，不再涉及 HTTP 细节。
+落点路径由 `ArchivePublisher.build_remote_path` 拼装；目标仓库/分支由
+`COMMIT_OWNER` / `COMMIT_REPO` / `COMMIT_BRANCH` **显式传入**，故不会去读
+Commit.json 或 `.git`。
 
 本脚本在调用前后自行增加的两道保障：
 
@@ -205,22 +205,22 @@ from typing import Any, Dict, List, Optional, Tuple, Iterable
 _SCRIPT_DIR = Path(__file__).resolve().parent          # .github/Python/QuoteCollect
 _PARENT_DIR = _SCRIPT_DIR.parent                       # .github/Python
 #: 两者都需在 sys.path 上：
-#:   父目录 —— 供 `import GitHubCommitContent`（Contents API 封装，**刻意不内联**，
-#:             它是同目录既有公共封装，复制一份只会带来两份实现漂移）；
-#:   本目录 —— 供后续「按功能拆分出同目录模块」时直接 import。
-#: 注：下方内联段自带的文档字符串（「完全自包含单文件版」「不含任何外部依赖」等）描述的是
-#: **被搬运的原型**，未随内联改写以保持搬运的可核对性；本文件的真实依赖边界以上一段为准。
+#:   父目录 —— 供 `ArchivePublisher` 导入 `GitHubCommitContent`（Contents API 封装，
+#:             该封装属仓库既有公共模块，刻意不复制进本目录）；
+#:   本目录 —— 供导入同目录的各功能模块。
 for _dir in (_PARENT_DIR, _SCRIPT_DIR):
     if str(_dir) not in sys.path:
         sys.path.insert(0, str(_dir))
 
-#: 注意：行情客户端库已提取到同目录 `MoomooOpenAPI.py`（公共契约见该模块 docstring）；
-#: 本文件保留采集链路（取数策略、时段归类、区间过滤、去重、作业与状态流转）。
-#: 因此本文件的仓库内依赖有三项：
-#:     1. `MoomooOpenAPI`（同目录）—— moomoo 客户端库，仅通过其公共契约使用；
-#:     2. `MvsvWriter`（同目录）—— MVSV 格式、数据模型与序列化；
-#:     3. `GitHubCommitContent`（上一级目录）—— Contents API 封装，既有公共模块。
-#: 故本文件不是"拷到哪都能跑"的完全自包含形态：**需与这三个模块同仓部署**
+#: 本文件只保留**采集编排与入口**（取数策略、时段归类、区间过滤、去重、七个阶段的编排）。
+#: 其余职责已分别提取，仓库内依赖共 6 项：
+#:     1. `JobCore`（同目录）—— 异常 / 日志 / 环境变量 / 字段归一化；
+#:     2. `SupabaseJobRepo`（同目录）—— 作业查询、表行映射、状态回写；
+#:     3. `ArchivePublisher`（同目录）—— 落点路径、指纹、Contents API 推送；
+#:     4. `MoomooOpenAPI`（同目录）—— moomoo 客户端库，仅经其公共契约使用；
+#:     5. `MvsvWriter`（同目录）—— MVSV 格式、数据模型与序列化；
+#:     6. `GitHubCommitContent`（上一级目录）—— 由 ArchivePublisher 使用，非本文件直接依赖。
+#: 故本文件不是"拷到哪都能跑"的单文件形态：**需与同目录模块同仓部署**
 #: （在仓库内运行、或按 CI 的检出方式部署均满足）。
 #: 它不依赖仓库根的绝对位置（导入走 sys.path，非相对路径推算）。
 

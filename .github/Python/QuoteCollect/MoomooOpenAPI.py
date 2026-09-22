@@ -15,12 +15,18 @@ Public contract of this module (everything else is internal):
     convertKlineItems()           raw kline_list -> list[KlineBar]
     KTYPE_MIN / KTYPE_DAY / EXTENDED_TIME_ALL    avoid hard-coded literals
 
-Everything else -- pure-stdlib crypto (Ed25519 / RSA-SHA256 / DER), signature assembly,
-HTTP transport, endpoint constants, error tables and internal helpers -- is implementation
-detail. Names starting with an underscore are internal; they are also deliberately left out
-of __all__ so that `from MoomooOpenAPI import *` exposes the contract only.
+Everything else -- HTTP transport, endpoint constants, error tables and internal helpers --
+is implementation detail. Names starting with an underscore are internal; they are also
+deliberately left out of __all__ so that `from MoomooOpenAPI import *` exposes the contract
+only.
 
 Credentials are read from the environment and never hard-coded here.
+
+Module layout inside this file (marked by `# 内联：<original module>` comments):
+this client library was vendored from an upstream package tree that no longer exists in
+this repository. The section markers name the original upstream modules purely for
+provenance -- they do NOT mean the code is inlined from somewhere else today; this file
+is the only copy. Signature/crypto now lives in the sibling module `MoomooAuth`.
 """
 
 import base64
