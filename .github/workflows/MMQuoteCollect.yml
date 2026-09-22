@@ -112,7 +112,7 @@ jobs:
           JOB_ID: ${{ inputs.job_id }}
           COMMIT_BRANCH: ${{ inputs.commit_branch || 'quote-mon' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
-          ENABLE_JOB_UPDATE: ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || 'false' }}
+          ENABLE_JOB_UPDATE: ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || secrets.SUPABASE_ENABLE_JOB_UPDATE || 'false' }}
         run: |
           echo "触发方式     : ${{ github.event_name }}"
           echo "检出分支     : ${{ inputs.branch || 'quote-mon' }}"
@@ -120,7 +120,7 @@ jobs:
           echo "指定作业 id  : ${JOB_ID:-(留空 → 按就绪规则自动取一条)}"
           echo "落点分支     : ${COMMIT_BRANCH}"
           echo "DRY_RUN      : ${DRY_RUN}"
-          echo "状态回写开关 : ${ENABLE_JOB_UPDATE}  (仓库变量 SUPABASE_ENABLE_JOB_UPDATE；false = 只打印待执行 SQL)"
+          echo "状态回写开关 : ${ENABLE_JOB_UPDATE}  (Variables 或 Secrets 中的 SUPABASE_ENABLE_JOB_UPDATE，vars 优先；false = 只打印待执行 SQL)"
           echo "周期覆盖     : ${{ inputs.period_override || '(无)' }}"
           echo "标的覆盖     : ${{ inputs.usc_override || '(无)' }}"
           echo "作业表判定   : job_status=READY 或 (job_status∈{FAILED,ABORTED} 且 count_retry<3)"
@@ -144,10 +144,11 @@ jobs:
           COMMIT_BRANCH: ${{ inputs.commit_branch || 'quote-mon' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           # ---- 状态回写总开关 ----
-          # 走**仓库变量**而非 workflow 输入：Settings → Secrets and variables → Actions
-          # → Variables 里改，即时生效，不必改本文件、不必发 PR、也不必重新触发。
+          # 走**仓库级配置**而非 workflow 输入：Settings → Secrets and variables → Actions 下
+          # 的 Variables **或** Secrets 均可（vars 优先、secrets 兜底）；改后即时生效，
+# 不必改本文件、不必发 PR、也不必重新触发。
           # 默认为 false（表写权限尚未配妥期间只打印待执行 SQL）；配妥后置 true 即上线。
-          SUPABASE_ENABLE_JOB_UPDATE: ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || 'false' }}
+          SUPABASE_ENABLE_JOB_UPDATE: ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || secrets.SUPABASE_ENABLE_JOB_UPDATE || 'false' }}
           # ---- 行情凭据 ----
           # 必填：Moomoo OpenAPI 凭据（由客户端库自行读取这两个变量名）
           MOOMOO_OPENAPI_AK: ${{ secrets.MOOMOO_OPENAPI_AK }}
@@ -185,7 +186,7 @@ jobs:
         env:
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          ENABLE_JOB_UPDATE: ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || 'false' }}
+          ENABLE_JOB_UPDATE: ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || secrets.SUPABASE_ENABLE_JOB_UPDATE || 'false' }}
           JOB_ID: ${{ steps.collect.outputs.job_id }}
           JOB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
@@ -229,7 +230,7 @@ jobs:
             echo "| 作业名 | ${JOB_NAME:-(未取到)} |"
             echo "| 执行前状态 | ${JOB_STATUS:-(未知)} |"
             echo "| 执行前重试 | ${JOB_COUNT_RETRY:-(未知)} |"
-            echo "| 状态回写 | ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || 'false' }} |"
+            echo "| 状态回写 | ${{ vars.SUPABASE_ENABLE_JOB_UPDATE || secrets.SUPABASE_ENABLE_JOB_UPDATE || 'false' }} |"
             echo ""
             echo "> 状态值即作业表 \`job_status\` 在执行前的取值；执行后的流转见上方步骤日志中的 SQL 计划。"
           } >> "$GITHUB_STEP_SUMMARY"
