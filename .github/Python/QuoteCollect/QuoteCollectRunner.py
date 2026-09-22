@@ -4645,6 +4645,9 @@ class JobStateWriter:
         self.client = client
         self.enabled = bool(enabled and client is not None)
         self.failures: List[str] = []
+        #: dry-run / 真实写入时累积的状态变更 SQL，供运行摘要集中展示
+        #: （动机：SQL 混在长日志里容易被淹没，摘要里一眼可见）
+        self.sqlPlans: List[str] = []
 
     def _plan(self, jobId: Any, action: str, payload: Dict[str, Any]) -> str:
         """渲染一条待执行 SQL（dry-run 打印 + 日志追溯两用）
@@ -4665,8 +4668,9 @@ class JobStateWriter:
         :return: True = 已写入或已按 dry-run 计划；False = 真实写入失败。
         """
         sql = self._plan(jobId, action, payload)
+        self.sqlPlans.append(sql)
         if not self.enabled:
-            _log("[状态·dry-run] %s" % sql)
+            _log("[SQL计划·dry-run] %s" % sql)
             return True
         try:
             affected = self.client.patch(JOB_TABLE, "id=eq.%s" % jobId, payload)
@@ -4763,19 +4767,31 @@ def _shortError(error: Optional[BaseException]) -> str:
 # 六、运行摘要（日志 + GitHub Step Summary）
 # ---------------------------------------------------------------------------
 def emit_summary(entries: Dict[str, Any]) -> None:
-    """输出运行摘要：终端日志 + `$GITHUB_STEP_SUMMARY`（有该环境变量时）"""
+    """输出运行摘要：终端日志 + `$GITHUB_STEP_SUMMARY`（有该环境变量时）
+
+    多行值（如「状态变更 SQL 计划」）用围栏代码块呈现：列表项里直接内嵌换行会糊成一段，
+    代码块在 Actions 摘要页更易读，也便于整段复制去执行。
+    """
     lines = ["## FTMM 历史 K 线采集作业运行摘要", ""]
     for key, value in entries.items():
-        lines.append("- **%s**：%s" % (key, value))
-    text = "\n".join(lines)
-    print("\n" + text + "\n", flush=True)
+        text = str(value)
+        if "\n" in text:
+            lines.append("- **%s**：" % key)
+            lines.append("")
+            lines.append("  ```sql")
+            lines.extend("  " + row for row in text.splitlines())
+            lines.append("  ```")
+        else:
+            lines.append("- **%s**：%s" % (key, text))
+    rendered = "\n".join(lines)
+    print("\n" + rendered + "\n", flush=True)
 
     summaryPath = (os.environ.get("GITHUB_STEP_SUMMARY") or "").strip()
     if not summaryPath:
         return
     try:
         with open(summaryPath, "a", encoding="utf-8") as handle:
-            handle.write(text + "\n")
+            handle.write(rendered + "\n")
     except OSError as exc:
         _warn("写入 GITHUB_STEP_SUMMARY 失败：%s" % exc)
 
@@ -4958,6 +4974,11 @@ def run_job(args: argparse.Namespace) -> int:
             if not args.enable_job_update:
                 _log("状态回写开关 %s=false → 本次只打印待执行 SQL（权限配妥后置 true 即生效）"
                      % ENV_ENABLE_JOB_UPDATE)
+        else:
+            # 调度表来源没有作业表客户端，状态流转不适用 —— 明确说明，
+            # 免得让人误以为「该打印的 SQL 没打印出来」
+            _log("作业来源 = %s（无作业表客户端）→ 本次不涉及作业状态流转，故无 SQL 计划"
+                 % args.job_source)
 
         # 发布作业标记：即便本进程随后被 job 级 timeout 强杀，善后步骤也能定位到这条作业
         _publish_run_marker(job)
@@ -5047,6 +5068,10 @@ def run_job(args: argparse.Namespace) -> int:
             "行数": pushResult.get("lines", "-"),
             "状态回写": "已启用" if args.enable_job_update else "dry-run（仅打印 SQL）",
             "状态回写失败": "; ".join(writer.failures) if writer.failures else "无",
+            "状态变更 SQL 计划": ("\n".join("  %d. %s" % (i, s)
+                                            for i, s in enumerate(writer.sqlPlans, 1))
+                                  if writer.sqlPlans
+                                  else "（本次无状态流转）"),
             "耗时": "%.1f 秒" % elapsed,
             "结果": "成功" if failure is None else "失败",
             "失败摘要": _shortError(failure) if failure is not None else "-",
