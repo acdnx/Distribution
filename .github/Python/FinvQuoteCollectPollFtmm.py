@@ -28,8 +28,8 @@ from SupabaseRestClient import SupabaseRestClient, SupabaseRestError, eqFilter
 GITHUB_OWNER = "ACANX"
 GITHUB_REPO = "Distribution"
 GITHUB_BRANCH = "quote"
-DATA_DIR = "Data/Finv/SecuQuoteV5/FTMM/Min/"          # MVSV 数据文件落点目录
-LOG_DIR = "Data/Finv/SecuQuoteV5/ExecLog"    # 执行日志落点目录
+DATA_DIR = "Data/Finv/SecurityQuoteV5/FTMM/Min"          # MVSV 数据文件落点目录
+LOG_DIR = "Data/Finv/SecurityQuoteV5/ExecLog"    # 执行日志落点目录
 
 # ============ 调度常量 ============
 # 单次运行采集的标的数量。按需求写死在此，后续如需调整直接改这里。
