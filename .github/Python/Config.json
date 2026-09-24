@@ -9,7 +9,7 @@
       { "code": "000001", "market": "A",      "weight_base": 22, "weight_freq": 1 },
       { "code": "688050", "market": "A",      "weight_base": 33, "weight_freq": 1 },
       { "code": "USDCNY", "market": "FX",      "weight_base": 95, "weight_freq": 1 },
-      { "code": "GCMain", "market": "FUTURES", "weight_base": 94, "weight_freq": 1 },
+      { "code": "GCMain", "market": "FUTURE",  "weight_base": 94, "weight_freq": 1 },
       { "code": "XAUUSD", "market": "FX",      "weight_base": 95, "weight_freq": 2 },
       { "code": "518880", "market": "A",       "weight_base": 92, "weight_freq": 1 },
       { "code": "159934", "market": "A",       "weight_base": 31, "weight_freq": 1 },

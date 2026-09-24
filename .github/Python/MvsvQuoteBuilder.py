@@ -14,7 +14,7 @@ MvsvQuoteBuilder —— MVSV 行情数据文件生成契约库（V5 格式）
     - 用户提供的 V5 样例 `.github/Python/000985_Min_20260820.mvsv`；
     - 本文件输出的头部与该样例**逐字节一致**（已用测试固定）。
 
-字段顺序变更记录（用户明确要求，勿擅自回调）：
+契约变更记录（用户明确要求，勿擅自回调）：
     - 2026-09-25：价格四列由 `o|c|l|h`（开|收|低|高）调整为
       **`o|h|l|c`（Open|High|Low|Close）**，即 OHLC 常规顺序；
       同步更新 # 字段名称 / # Field / # FieldName 三行头部与数据行列序，
@@ -24,6 +24,26 @@ MvsvQuoteBuilder —— MVSV 行情数据文件生成契约库（V5 格式）
       少一项——因为本格式的中文名是从更早的 **11 字段**结构
       （Ts|Date|Time|Open|Close|Low|High|Volume|Turnover|ChangePrice|ChangePercent）
       沿用下来的，V5 新增第 12 列 lc 时漏补。现四行条目数统一为 12。
+    - 2026-09-25：`# TimeZone` 由「恒为空」改为**按市场/地区给缺省 IANA 时区**
+      （规则见「三」；CN/SH/SZ/BJ → `Asia/Shanghai`，US → `America/New_York`）。
+      调用方仍可传 `timezone=` 显式覆盖，属"临时处理"方案。
+    - 2026-09-25：市场标识 `FUTURES` **统一改为 `FUTURE`**（用户要求）。
+      改动点共 4 处，必须同改否则查表失配：
+        · 本文件 `MARKET_META` 的键与 `"market"` 值；
+        · 本文件 `TIMEZONE_BY_REGION` 的键；
+        · `Config.json` 中 GCMain 的 `"market"` 值；
+        · `FinvQuoteCollectPollFtmm.py` 的 `market in ("FX", "FUTURE")` 判定。
+      **不再兼容旧值 `FUTURES`**（按"统一"语义做干净重命名）。
+    - 2026-09-25：头部 `# Region` / `# Market` / `# TimeZone` / `# Symbol` 改为
+      **优先取状态视图 `finv_quote_collect_state_poll_futu_view` 的直出列**
+      （调用方经 `region=` / `market=` / `timezone=` / `symbol=` 传入），
+      **不再依赖外部文件（Config.json）关联**；同时 `# SecuCode` / `# USC`
+      改用视图主键 **usc**（该表主键字段由 secu_code 改为 usc）。
+      实现方式：`resolveMarketMeta` / `buildMvsvContent` 新增可选参数
+      `region` / `symbol` / `usc`；**region 与 symbol 都不传时仍走原
+      Config.json 兼容路径**，故老调用（只传 market=）行为不变、不回归。
+      Market 取值形态随之由「A」变为交易所级（SZ / SH / BJ），
+      故新增 CURRENCY_BY_MARKET 覆盖交易所级标识。
 
 形态说明：
     - 纯函数库，没有命令行入口；import 无副作用、不触网；
@@ -45,14 +65,17 @@ MvsvQuoteBuilder —— MVSV 行情数据文件生成契约库（V5 格式）
     # FieldType : "Int|Int|Int|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal"
     # TypeKLine : Min
     # Count : {行数}
-    # Symbol : {exchange}.{code}
-    # SecuCode : {code}
-    # USC : {code}
-    # Name : {名称，暂无恒为空}
-    # Region : {区域}
-    # Market : {市场}
-    # TimeZone : {暂无恒为空}
-    # Currency : {币种}
+    # Symbol : {完整符号，如 SZ.159937（视图直出）}
+    # SecuCode : {usc}
+    # USC : {usc}
+    # Name : {名称，恒为空（视图有 name_sc 但样例口径为空，是否启用待用户确认）}
+    # Region : {区域，如 CN（视图直出）}
+    # Market : {市场，如 SZ（视图直出，交易所级）}
+    # TimeZone : {IANA 时区标识，如 Asia/Shanghai（视图直出，见「三」）}
+    # Currency : {币种，如 CNY}
+
+    其中 Symbol / SecuCode / USC / Region / Market / TimeZone 由状态视图
+    `finv_quote_collect_state_poll_futu_view` 的直出列决定（2026-09-25 起）。
 
 4. 数据行按 12 字段以 | 拼接（空字段保留空位，lc 为空时行尾自然带 |）：
 
@@ -84,18 +107,49 @@ MvsvQuoteBuilder —— MVSV 行情数据文件生成契约库（V5 格式）
    date_suffix 形如 20260820，**仅日期、北京时间口径，一天一个文件**；
    同一品种同一天重复采集覆盖当日文件。后缀由 DateTimeUtil.fmtDateSuffix 生成）。
 
-三、市场元数据（Symbol / Region / Market / Currency）
+三、市场元数据（Symbol / Region / Market / TimeZone / Currency）
 ----------------------------------------------------------------------------------------
-- A 股（market="A"）：Market/Symbol 前缀按代码判定交易所：
-  5/6/9 开头 → SH，其余（0/2/3 等）→ SZ；Region=CN，Currency=CNY；
-- 其他市场：按 MARKET_META 表取 Market/Region/Currency，Symbol = {Market}.{code}；
-  表内取值是与用户确认的约定，**调整须经用户同意**；
-- market 未知 / 未传：Symbol={code}，Region/Market/Currency 留空（宁空勿猜）。
+resolveMarketMeta 有**两条取值路径**，判据是「region 与 symbol 是否传入」：
+
+【一号路径 · 视图直出（正常运行时走这条）】
+    调用方把状态视图 `finv_quote_collect_state_poll_futu_view` 的 region / market /
+    symbol / timezone 原样传入，本库**原样采用、不做推断**，只补两个视图没有的列：
+      · Currency：按「市场 → 地区」查 CURRENCY_BY_MARKET / CURRENCY_BY_REGION
+        （SH/SZ/BJ/A/CN → CNY，HK → HKD，US/FUTURE/FX/CRYPTO → USD；查不到留空）；
+      · TimeZone：调用方未传时按「地区 → 市场」查 TIMEZONE_BY_REGION 取缺省。
+    market 若显式传成 Config.json 口径的 `A`，按代码前缀换算为 SH/SZ
+    （头部的 Market 一律是交易所级，不写 `A`）。
+
+【二号路径 · 旧 market 口径兼容（只传 market= 时走这条）】
+    （注意：本库是**纯函数库，自身从不读任何文件**；这里的「Config.json 口径」指的是
+      调用方过去从 Config.json 拿到的 market 取值词表（A / HK / US / FX / FUTURE / CRYPTO），
+      2026-09-25 起调用方已改从状态视图取元数据，这条路径只为兼容老调用而保留。）
+    region 与 symbol 都未传 → 判定为旧调用口径，按原规则解析：
+      · market="A"：Symbol/Market 前缀按代码判定交易所（5/6/9 开头 → SH，
+        其余 0/2/3 等 → SZ），Region=CN，Currency=CNY，TimeZone=Asia/Shanghai；
+      · 其他 market：按 MARKET_META 表取 Market/Region，Symbol = {Market}.{code}；
+        表内取值是与用户确认的约定，**调整须经用户同意**；
+      · market 未知 / 未传：Symbol={code}，其余留空（宁空勿猜）。
+
+TimeZone（IANA 标识，如 Asia/Shanghai）：**优先用调用方显式传入的 timezone 参数**
+（视图直出值）；未传时按「地区 → 市场」查 TIMEZONE_BY_REGION 取缺省；两者都查不到
+则留空（宁空勿猜）。当前缺省口径（2026-09-25 用户指定，属"临时处理"，日后可改为
+数据源直出）：
+    · CN / SH / SZ / BJ → `Asia/Shanghai`
+    · US（含 Region=US 的 FUTURE）→ `America/New_York`（美东，自带 EST/EDT 夏令时）
+    · HK → `Asia/Hong_Kong`
+    · FX / CRYPTO → 留空（24 小时市场，无单一时区）
 
 四、使用示例（同目录脚本）
 ----------------------------------------------------------------------------------------
     from MvsvQuoteBuilder import buildMvsvContent, buildMvsvFileName
 
+    # 一号路径：头部市场元数据取自状态视图直出列（推荐）
+    content = buildMvsvContent("159937", minute_list, usc="159937",
+                               region="CN", market="SZ", symbol="SZ.159937",
+                               timezone="Asia/Shanghai")
+
+    # 二号路径：无视图元数据时按 Config.json 口径解析（兼容旧调用）
     content = buildMvsvContent("000985", minute_list, market="A")
     file_name = buildMvsvFileName("000985", "20260820")       # 000985_Min_20260820.mvsv
 
@@ -152,16 +206,45 @@ TITLE_BY_PERIOD = {"Min": "分钟级行情数据"}
 DEFAULT_TITLE = "行情数据"
 
 # ============ 市场元数据（非 A 市场的取值约定，调整须经用户同意） ============
-# A 股走 resolveCnExchange 单独处理；其他市场按 Config.json 的 market 取值查表。
+# 【二号路径 Config.json 兼容】按 Config.json 的 market 取值查表；仅映射 Market/Region，
+# Currency / TimeZone 由 _resolve_currency / _resolve_default_timezone 统一补缺省。
+# 【一号路径 视图直出】不使用本表（视图的 region/market/symbol 已权威）。
 MARKET_META = {
-    "HK":      {"market": "HK",      "region": "HK", "currency": "HKD"},
-    "US":      {"market": "US",      "region": "US", "currency": "USD"},
-    "FX":      {"market": "FX",      "region": "",   "currency": "USD"},
-    "FUTURES": {"market": "FUTURES", "region": "US", "currency": "USD"},
-    "CRYPTO":  {"market": "CRYPTO",  "region": "",   "currency": "USD"},
+    "HK":     {"market": "HK",     "region": "HK"},
+    "US":     {"market": "US",     "region": "US"},
+    "FX":     {"market": "FX",     "region": ""},
+    "FUTURE": {"market": "FUTURE", "region": "US"},
+    "CRYPTO": {"market": "CRYPTO", "region": ""},
 }
 # A 股判定为 SH 的代码首字符（60/68 主板科创、5x ETF、9x B 股等）
 CN_SH_PREFIXES = ("5", "6", "9")
+# 交易所级 A 股市场标识（视图 market 的取值形态；用于时段判定等需要「A 股整体」口径的场景）
+CN_EXCHANGES = ("SH", "SZ", "BJ")
+
+# ============ 币种缺省（# Currency；视图不返回币种，由 Market / Region 推） ============
+CURRENCY_BY_MARKET = {
+    "A": "CNY", "SH": "CNY", "SZ": "CNY", "BJ": "CNY",   # A 股及其三个交易所
+    "HK": "HKD",
+    "US": "USD", "FUTURE": "USD", "FX": "USD", "CRYPTO": "USD",
+}
+CURRENCY_BY_REGION = {"CN": "CNY", "HK": "HKD", "US": "USD"}
+
+# ============ 时区缺省（# TimeZone；2026-09-25 用户指定的"临时处理"口径） ============
+# 中国大陆（沪/深/北，含 Region=CN）统一用 Asia/Shanghai（无夏令时）
+CN_TIMEZONE = "Asia/Shanghai"
+# 美东：America/New_York 是 IANA 对 US Eastern Time 的标准标识，自带 EST/EDT 切换
+US_EASTERN_TIMEZONE = "America/New_York"
+# 「地区 / 市场标识 → IANA 时区标识」缺省表（键统一大写）。
+# 查不到即留空（宁空勿猜）：FX / CRYPTO 是 24 小时市场，无单一时区。
+TIMEZONE_BY_REGION = {
+    "CN": CN_TIMEZONE,               # A 股 Region
+    "SH": CN_TIMEZONE,               # 上交所
+    "SZ": CN_TIMEZONE,               # 深交所
+    "BJ": CN_TIMEZONE,               # 北交所
+    "US": US_EASTERN_TIMEZONE,       # 美股 / 美区
+    "HK": "Asia/Hong_Kong",          # 港股
+    "FUTURE": US_EASTERN_TIMEZONE,  # 期货：Region 为空时的兜底
+}
 
 
 def resolveCnExchange(secu_code):
@@ -173,25 +256,73 @@ def resolveCnExchange(secu_code):
     return "SH" if str(secu_code).startswith(CN_SH_PREFIXES) else "SZ"
 
 
-def resolveMarketMeta(secu_code, market=None):
-    """解析 V5 头部的市场元数据（Symbol / Region / Market / Currency）
+def _resolve_default_timezone(resolved_market, region):
+    """按「地区 → 市场」取 # TimeZone 缺省 IANA 标识；都查不到返回空串（宁空勿猜）"""
+    for key in (region, resolved_market):
+        tz = TIMEZONE_BY_REGION.get((key or "").strip().upper())
+        if tz:
+            return tz
+    return ""
 
-    :param secu_code: 证券代码
-    :param market: Config.json 中的市场标识（A / HK / US / FX / FUTURES / CRYPTO）；
-                   None 或未知时保守留空（宁空勿猜）
-    :return: {"symbol","region","market","currency"} 四键 dict
-    """
+
+def _resolve_currency(region, market):
+    """按「市场 → 地区」取 # Currency；都查不到返回空串（宁空勿猜）"""
+    for table, key in ((CURRENCY_BY_MARKET, market), (CURRENCY_BY_REGION, region)):
+        currency = table.get((key or "").strip().upper())
+        if currency:
+            return currency
+    return ""
+
+
+def _compose_market_meta(market, region, symbol):
+    """把 Market / Region / Symbol 组合成五键元数据（Currency 与 TimeZone 补缺省）"""
+    return {"symbol": symbol, "region": region, "market": market,
+            "currency": _resolve_currency(region, market),
+            "timezone": _resolve_default_timezone(market, region)}
+
+
+def _resolve_legacy_market_meta(secu_code, market):
+    """二号路径：按 Config.json 口径的 market 解析元数据（无视图元数据时的旧行为）"""
     m = (market or "").strip().upper()
     if m == "A":
         exch = resolveCnExchange(secu_code)
-        return {"symbol": "%s.%s" % (exch, secu_code),
-                "region": "CN", "market": exch, "currency": "CNY"}
+        return _compose_market_meta(exch, "CN", "%s.%s" % (exch, secu_code))
     info = MARKET_META.get(m)
     if info is None:
-        return {"symbol": str(secu_code), "region": "", "market": "", "currency": ""}
-    return {"symbol": "%s.%s" % (info["market"], secu_code),
-            "region": info["region"], "market": info["market"],
-            "currency": info["currency"]}
+        return _compose_market_meta("", "", str(secu_code))
+    return _compose_market_meta(info["market"], info["region"],
+                                "%s.%s" % (info["market"], secu_code))
+
+
+def resolveMarketMeta(secu_code, market=None, region="", symbol="", usc=""):
+    """解析 V5 头部的市场元数据（Symbol / Region / Market / TimeZone / Currency）
+
+    两条路径，判据是「region 与 symbol 是否传入」（规则详见模块文档「三」）：
+      1) 视图直出：region / market / symbol 原样采用（只补 Currency 与 TimeZone 缺省）；
+      2) Config.json 兼容：region 与 symbol 都未传时按旧口径解析（老调用不回归）。
+
+    :param secu_code: 证券代码（写入 # SecuCode；视图路径下一般就传 usc）
+    :param market: 市场标识；视图口径为交易所级（SH/SZ/BJ/HK/US/FX/FUTURE/CRYPTO），
+                   兼容口径为 Config.json 口径（A/HK/US/FX/FUTURE/CRYPTO）
+    :param region: 视图直出的地区（如 CN / HK / US）；传入即走视图路径
+    :param symbol: 视图直出的完整符号（如 SZ.159937）；传入即走视图路径
+    :param usc: 视图主键 USC（视图路径下用于推导 Symbol 的兜底）
+    :return: {"symbol","region","market","timezone","currency"} 五键 dict
+    """
+    m = (market or "").strip().upper()
+    r = (region or "").strip().upper()
+    sym = (symbol or "").strip()
+
+    # 二号路径：只有 market（旧调用口径）
+    if not r and not sym:
+        return _resolve_legacy_market_meta(secu_code, market)
+
+    # 一号路径：视图直出。头部的 Market 一律交易所级，故「A」按代码前缀换算
+    if m == "A":
+        m = resolveCnExchange(usc or secu_code)
+    if not sym:
+        sym = ("%s.%s" % (m, usc or secu_code)) if m else str(usc or secu_code)
+    return _compose_market_meta(m, r, sym)
 
 
 def buildMvsvFileName(secu_code, date_suffix, period="Min"):
@@ -245,17 +376,27 @@ def _build_data_rows(minute_list):
     return rows
 
 
-def buildMvsvContent(secu_code, minute_list, market=None, name="", period="Min"):
+def buildMvsvContent(secu_code, minute_list, market=None, name="", period="Min",
+                     timezone="", region="", symbol="", usc=""):
     """构建 V5 格式 MVSV 文件完整文本（头部 16 行 + 空行 + 数据行，以 \\n 结尾）
 
-    :param secu_code: 证券代码（如 000985）
+    头部 Symbol / SecuCode / USC / Region / Market / TimeZone / Currency 的取值口径
+    见模块文档「三」：region / symbol 传入即走**状态视图直出**路径（推荐）。
+
+    :param secu_code: 证券代码（写入 # SecuCode；视图路径下一般与 usc 同值）
     :param minute_list: 分钟数据行列表（数据源原始 dict 列表，含 ts/c/v/t/cr/cp 键）
-    :param market: Config.json 的市场标识（决定 Symbol/Region/Market/Currency）
-    :param name: 证券名称（暂无数据源，恒为空）
+    :param market: 市场标识（视图直出为交易所级 SH/SZ/BJ/…；兼容路径为 A/HK/US/…）
+    :param name: 证券名称；**恒为空**（视图有 name_sc，但样例口径为空，是否启用待确认）
     :param period: 数据周期标识，默认 Min（写入 # TypeKLine 与标题）
+    :param timezone: IANA 时区标识（视图直出，如 Asia/Shanghai）；
+                     留空则按 market / 地区取缺省，查不到仍留空
+    :param region: 视图直出的地区（如 CN）
+    :param symbol: 视图直出的完整符号（如 SZ.159937）
+    :param usc: 视图主键 USC（写入 # USC）；留空回落到 secu_code
     :return: 文件完整文本（UTF-8、LF、以换行结束）
     """
-    meta = resolveMarketMeta(secu_code, market)
+    meta = resolveMarketMeta(secu_code, market, region=region, symbol=symbol, usc=usc)
+    tz = (timezone or "").strip() or meta["timezone"]
     lines = [
         "# 标题 : %s %s" % (secu_code, TITLE_BY_PERIOD.get(period, DEFAULT_TITLE)),
         '# 字段名称 : "%s"' % FIELD_NAMES_CN,
@@ -267,11 +408,11 @@ def buildMvsvContent(secu_code, minute_list, market=None, name="", period="Min")
         "# Count : %d" % len(minute_list),
         "# Symbol : %s" % meta["symbol"],
         "# SecuCode : %s" % secu_code,
-        "# USC : %s" % secu_code,
+        "# USC : %s" % (usc or secu_code),
         "# Name : %s" % name,
         "# Region : %s" % meta["region"],
         "# Market : %s" % meta["market"],
-        "# TimeZone : ",
+        "# TimeZone : %s" % tz,
         "# Currency : %s" % meta["currency"],
         "",
     ]

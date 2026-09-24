@@ -8,23 +8,37 @@
 #      3) 把 branch 输入的默认值改成脚本常驻的分支。
 #
 # 数据链路：
-#   状态表  Supabase PG finv_quote_collect_state_poll_futu（flag_enable='1' 参与轮询，
-#           读取 + 回写均经 PostgREST；dt_update 由表上触发器自动维护）
+#   状态视图 Supabase PG finv_quote_collect_state_poll_futu_view —— **读取源**
+#           （security_invoker 视图，由 z=state / a=collect_futu / b=secu 三表 join 而成）。
+#           视图直出：usc / name_sc / region / market / timezone / symbol / futu_symbol
+#           以及 weight_priority / weight_frequency 两个调度权重，
+#           故 **MVSV 头部元数据与调度权重都取自视图，不再依赖任何外部配置文件**
+#           （Config.json 已退出本作业）。
+#           **视图定义自带筛选**：三表 flag_enable='1' 且 provider='FTMM'，
+#           客户端不再另加过滤（视图也未暴露 flag_enable 列，硬拼会 400）。
+#           行身份为主键 usc（2026-09-25 由 secu_code 改为 usc）。
+#   状态表  Supabase PG finv_quote_collect_state_poll_futu —— **回写目标**（视图只读）。
+#           回写键为 usc；dt_update 由表上触发器自动维护。
 #   行情    LAMBDA_FTMM_API_BASE（secrets 注入；必填，未配置直接失败）→ 分钟线 JSON
+#           请求参数 secuCode 取 usc（即原 secu_code 的重命名，与旧版口径一致）
 #   产物    MVSV → Contents API 递交 ACANX/Distribution @ quote :
-#           {DATA_DIR}/{code}/{code}_Min_{yyyyMMdd}.mvsv（**一天一个文件，按北京时间日期**；
+#           {DATA_DIR}/{usc}/{usc}_Min_{yyyyMMdd}.mvsv（**一天一个文件，按北京时间日期**；
 #           同一天重复运行覆盖当日文件；DATA_DIR 为脚本内常量）
 #           （目标仓库/分支由脚本内常量锁定，与本仓库 acdnx/Distribution 无关）
 #   日志    {LOG_DIR}/{yyyyMMdd_HHmmss}.log（一次运行一个文件，保留时分秒）
 #
 # 必需 Secrets / Variables：
-#   SUPABASE_PROJECT_REF / SUPABASE_KEY  Supabase 凭据（读 / 回写状态表）
+#   SUPABASE_PROJECT_REF / SUPABASE_KEY  Supabase 凭据（读状态视图 / 回写状态表）
 #   GIT_COMMIT_TOKEN                     GitHub 令牌（需 ACANX/Distribution 的
 #                                        contents:write 权限）
 #   LAMBDA_FTMM_API_BASE                 行情 API 端点（**必填**；secrets 优先回落 vars。
 #                                        名字必须与客户端 ENV_API_BASE 一致，否则会解析成
 #                                        占位符 ===LAMBDA_FTMM_API_BASE=== 而请求失败）
 #                                        （旧名 API_BASE 仍兼容，但不再作为主用）
+#
+# 可选环境变量（缺省值已写在脚本常量里，一般无需配置）：
+#   POLL_STATE_VIEW  状态读取源（缺省 finv_quote_collect_state_poll_futu_view）
+#   POLL_STATE_TABLE 状态回写目标（缺省 finv_quote_collect_state_poll_futu）
 #
 # 退出码语义（脚本约定）：0 = 成功（含无启用品种 / dry_run）；1 = 致命错误
 # 或任一选中品种采集/递交失败（状态回写与执行日志在任何情况下都先完成再退出）。
@@ -79,12 +93,14 @@ jobs:
           echo "检出分支   : ${{ inputs.branch || 'sche' }}"
           echo "DRY_RUN    : ${{ inputs.dry_run || 'false' }}"
           echo "数据落点   : ACANX/Distribution @ quote（脚本内常量锁定）"
-          echo "单次采集数 : POLL_COUNT（脚本内常量定义，当前为 1）"
-          echo "状态表     : finv_quote_collect_state_poll_futu（flag_enable='1'）"
+          echo "单次采集数 : POLL_COUNT（脚本内常量定义）"
+          echo "状态视图   : finv_quote_collect_state_poll_futu_view（读取源，主键 usc）"
+          echo "视图筛选   : 由视图定义负责（三表 flag_enable=1 且 provider=FTMM）"
+          echo "状态表     : finv_quote_collect_state_poll_futu（回写目标，键 usc）"
 
       - name: 执行轮询采集
         env:
-          # 必填：Supabase 凭据（PostgREST 读 / 回写状态表）
+          # 必填：Supabase 凭据（PostgREST 读状态视图 / 回写状态表）
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           # 必填：GitHub 写仓库令牌（经 Contents API 递交 MVSV / 日志到

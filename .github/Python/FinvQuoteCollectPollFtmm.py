@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # GitHubCommitContent 只使用其公开递交能力；HTTP 收发走 HttpUtil、控制台编码走 ConsoleUtil
 from GitHubCommitContent import commit_content
 from ConsoleUtil import ensureConsoleUtf8
-from MvsvQuoteBuilder import buildMvsvContent, buildMvsvFileName
+from MvsvQuoteBuilder import (CN_EXCHANGES, buildMvsvContent,
+                              buildMvsvFileName)
 from FtmmQuoteV2WebRestClient import (ENV_API_BASE, extractMinuteList,
                                       fetchFiveDayMinuteQuote, isApiBaseUsable,
                                       maskApiUrl, resolveApiBase)
@@ -39,24 +40,36 @@ FORCE_FETCH_INTERVAL = 72 * 3600          # 距上次检查超过 72 小时强�
 # ============ 环境变量 ============
 # Supabase 凭据由 SupabaseRestClient 从环境变量读取（不在此处留存副本）
 GIT_COMMIT_TOKEN = os.environ.get("GIT_COMMIT_TOKEN", "").strip()
+# 状态读取源 = 视图（列口径见 STATE_VIEW_COLUMNS；视图直出 region/market/timezone/
+# symbol/weight_priority/weight_frequency，故本作业**不再依赖任何外部配置文件**）
+STATE_VIEW = os.environ.get("POLL_STATE_VIEW",
+                            "finv_quote_collect_state_poll_futu_view").strip()
+# 状态回写目标 = 表（视图只读，更新一律落表）
 STATE_TABLE = os.environ.get("POLL_STATE_TABLE", "finv_quote_collect_state_poll_futu").strip()
-FLAG_ENABLE = os.environ.get("POLL_FLAG_ENABLE", "1").strip()
+# 行身份列：2026-09-25 起表主键由 secu_code 改为 usc（视图与表同名同值）
+STATE_KEY = "usc"
+# 视图查询的列清单——**必须与视图定义严格对齐**（PostgREST 对不存在的列直接 400）。
+# 已知视图定义（security_invoker）已自行筛选：z/a/b 三表 flag_enable='1'
+# 且 b.provider='FTMM'，故：
+#   · 不查 flag_enable（视图未暴露该列），也**不要**在客户端拼该过滤条件；
+#   · 取到的行天然都是启用中的 FTMM 品种，无需再按 provider 过滤。
+STATE_VIEW_COLUMNS = ("usc,name_sc,region,market,timezone,provider,symbol,futu_symbol,"
+                      "dt_last_check,dt_last_fetch,ts_latest_data,count_last_fetch,"
+                      "count_fail,count_stale,weight_priority,weight_frequency")
+# 执行日志里记录视图自带的筛选口径（自证：为什么日志里没有 flag_enable 过滤）
+STATE_VIEW_FILTER = "视图定义：flag_enable=1（z/a/b 三表）且 provider=FTMM"
 DRY_RUN = os.environ.get("POLL_DRY_RUN", "").strip().lower() in ("true", "1", "yes", "on")
 TEMP_DIR = Path(os.environ.get("POLL_TEMP_DIR", "")) if os.environ.get("POLL_TEMP_DIR", "").strip() \
     else Path(tempfile.gettempdir()) / "finv_quote_collect_poll_ftmm"
-
-# 品种 → 市场 / 权重 元数据（load_config_meta() 填充；空值时回退中性权重）
-CODE_MARKET: Dict[str, str] = {}
-CODE_WEIGHT_BASE: Dict[str, int] = {}
-CODE_WEIGHT_FREQ: Dict[str, int] = {}
 
 # 执行日志聚合（运行结束时整体上传；密钥类信息一律不进这里）
 EXEC_LOG: Dict[str, object] = {
     "start_time": None,
     "dry_run": DRY_RUN,
     "state_backend": "supabase_pg",
+    "state_view": STATE_VIEW,
     "state_table": STATE_TABLE,
-    "flag_enable": FLAG_ENABLE,
+    "state_view_filter": STATE_VIEW_FILTER,
     "poll_count": POLL_COUNT,
     "selected": [],
     "results": [],
@@ -64,52 +77,31 @@ EXEC_LOG: Dict[str, object] = {
 }
 
 
-# ============ Config.json 元数据（临时兼容旧版） ============
-def load_config_meta() -> None:
-    """从 Config.json 加载市场/权重元数据（旧版临时兼容；缺失时回退中性权重）
-
-    只取 code → market / weight_base / weight_freq 三个映射；品种全集以状态表为准，
-    Config.json 中多出的品种不会参与轮询。文件缺失仅告警不阻断（中性权重 5.0 兜底）。
-    """
-    config_file = os.environ.get("CONFIG_FILE", "Config.json")
-    cfg_path = Path(config_file)
-    if not cfg_path.is_absolute():
-        cfg_path = Path(os.path.dirname(os.path.abspath(__file__))) / config_file
-    if not cfg_path.exists():
-        print("⚠️ [配置] 未找到 %s：市场/权重元数据缺失，全部品种按中性权重 5.0 处理" % cfg_path)
-        return
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-    except (OSError, ValueError) as e:
-        print("⚠️ [配置] 读取 %s 失败（%s）：全部品种按中性权重 5.0 处理" % (cfg_path, e))
-        return
-
-    for s in config.get("secu", []):
-        code = s.get("code")
-        if not code:
-            continue
-        CODE_MARKET[code] = s.get("market", "UNKNOWN")
-        for key, target in (("weight_base", CODE_WEIGHT_BASE), ("weight_freq", CODE_WEIGHT_FREQ)):
-            raw = s.get(key)
-            if raw is None:
-                continue
-            try:
-                value = int(raw)
-                if 1 <= value <= 10000:
-                    target[code] = value
-            except (TypeError, ValueError):
-                pass
-    print("[配置] 已加载 %s：%d 个品种的市场/权重元数据" % (cfg_path, len(CODE_MARKET)))
-
-
-# ============ 状态读写（PostgREST 访问见 SupabaseRestClient.py） ============
+# ============ 状态读写（**读视图、写表**，PostgREST 访问见 SupabaseRestClient.py） ============
 def _to_int(value, default=0):
     """宽松转 int（PG 返回值可能为 None / 字符串）"""
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _to_weight(value, default=1):
+    """宽松转调度权重（沿用旧 Config.json 的口径：1..10000 之外一律视为无效，回落 default）
+
+    视图的 weight_priority / weight_frequency 取自状态表 z 列，理论上已受表约束；
+    这里仍按旧口径夹一道，避免脏值把 score 打成 0 或负数导致品种长期选不中。
+    """
+    try:
+        weight = int(value)
+    except (TypeError, ValueError):
+        return default
+    return weight if 1 <= weight <= 10000 else default
+
+
+def _one_line(text):
+    """把文案压成单行并截断（PostgREST 的错误响应可能多行且很长）"""
+    return " ".join(str(text).split())[:200]
 
 
 def _scrub(text):
@@ -129,28 +121,53 @@ def _scrub(text):
 
 
 def load_state(client):
-    """读取状态表：返回 (品种代码列表, 状态映射)
+    """读取状态视图（读视图、写表）：返回 (usc 列表, 状态映射)
 
-    只取 flag_enable 选中的行；列名与 PG 表结构一一对应：
-    dt_last_check / dt_last_fetch / ts_latest_data / count_last_fetch /
-    count_fail / count_stale。
+    读取源为视图 STATE_VIEW（finv_quote_collect_state_poll_futu_view）——它已把
+    region / market / timezone / symbol 等元数据、weight_priority / weight_frequency
+    两个调度权重、以及各状态字段拼在一行，故**本作业不再依赖任何外部配置文件**
+    （Config.json 已退出）；行身份为 STATE_KEY = usc（2026-09-25 起表主键由
+    secu_code 改为 usc）。
+
+    采集请求代码即 **usc**（它正是原 secu_code 的重命名，与旧版请求口径一致）；
+    视图另有 futu_symbol（数据源侧代码）与 symbol（= quote_market.futu_symbol），
+    本脚本不使用，如后续需改用 futu_symbol 请先与用户确认。
+
+    **不拼 flag_enable 过滤**：视图定义（security_invoker）已自行筛掉未启用品种
+    （z/a/b 三表 flag_enable='1' 且 provider='FTMM'），且该列并不在视图暴露的列里，
+    客户端硬拼会直接 400。
+
+    状态映射每项含三组键：
+      · 头部元数据（视图直出）：usc / name / region / market / timezone / symbol
+      · 调度权重（视图直出）：weight_base（← weight_priority）/ weight_freq（← weight_frequency）
+      · 状态字段（回写表用）：time_last_check / time_last_fetch / ts_latest_data /
+        count_last_fetch / count_fail / count_stale
     """
-    query_string = ("select=secu_code,dt_last_check,dt_last_fetch,ts_latest_data,"
-                    "count_last_fetch,count_fail,count_stale"
-                    "&%s&order=secu_code.asc" % eqFilter("flag_enable", FLAG_ENABLE))
-    text = client.query(STATE_TABLE, query_string)
+    query_string = "select=%s&order=%s.asc" % (STATE_VIEW_COLUMNS, STATE_KEY)
+    text = client.query(STATE_VIEW, query_string)
     rows = json.loads(text)
     if not isinstance(rows, list):
-        raise SupabaseRestError("状态表查询响应不是 JSON 数组")
+        raise SupabaseRestError("状态视图查询响应不是 JSON 数组")
 
-    codes: List[str] = []
+    usc_list: List[str] = []
     state_map: Dict[str, Dict[str, Union[str, int]]] = {}
     for row in rows:
-        code = (row.get("secu_code") or "").strip()
-        if not code:
+        usc = str(row.get(STATE_KEY) or "").strip()
+        if not usc:
             continue
-        codes.append(code)
-        state_map[code] = {
+        usc_list.append(usc)
+        state_map[usc] = {
+            # —— MVSV 头部元数据（视图直出；name 仅用于日志，# Name 仍按样例恒空） ——
+            "usc": usc,
+            "name": str(row.get("name_sc") or "").strip(),
+            "region": str(row.get("region") or "").strip(),
+            "market": str(row.get("market") or "").strip(),
+            "timezone": str(row.get("timezone") or "").strip(),
+            "symbol": str(row.get("symbol") or "").strip(),
+            # —— 调度权重（视图直出；列名对应关系见 docstring） ——
+            "weight_base": _to_weight(row.get("weight_priority")),
+            "weight_freq": _to_weight(row.get("weight_frequency")),
+            # —— 状态字段（与视图列一一对应） ——
             "time_last_check": row.get("dt_last_check") or "",
             "time_last_fetch": row.get("dt_last_fetch") or "",
             "ts_latest_data": _to_int(row.get("ts_latest_data")),
@@ -158,16 +175,16 @@ def load_state(client):
             "count_fail": _to_int(row.get("count_fail")),
             "count_stale": _to_int(row.get("count_stale")),
         }
-    print("[状态] 从 %s 加载成功：%d 个品种（flag_enable=%s）"
-          % (STATE_TABLE, len(codes), FLAG_ENABLE))
-    return codes, state_map
+    print("[状态] 从视图 %s 加载成功：%d 个品种（筛选口径由视图定义负责）"
+          % (STATE_VIEW, len(usc_list)))
+    return usc_list, state_map
 
 
-def patch_state_row(client, code, state):
-    """把单品种状态回写状态表（dt_update 由表上触发器自动维护，flag_enable 不动）
+def patch_state_row(client, usc, state):
+    """把单品种状态回写**表** STATE_TABLE（视图只读；dt_update 由表上触发器维护）
 
-    时间列为空（从未采集/从未取到新数据）时不出现在载荷里，保持 NULL 原状；
-    计数列强制夹非负，满足表上的 chk_*_nonnegative 约束。
+    过滤键为 STATE_KEY（usc，表主键）。时间列为空（从未采集/从未取到新数据）时
+    不出现在载荷里，保持 NULL 原状；计数列强制夹非负，满足表上的 chk_*_nonnegative 约束。
     """
     payload = {}
     if state.get("time_last_check"):
@@ -179,22 +196,40 @@ def patch_state_row(client, code, state):
     payload["count_fail"] = max(0, _to_int(state.get("count_fail")))
     payload["count_stale"] = max(0, _to_int(state.get("count_stale")))
 
-    filters = eqFilter("secu_code", code)
+    filters = eqFilter(STATE_KEY, usc)
     text = client.patch(STATE_TABLE, filters, payload)
     try:
         hit = len(json.loads(text)) if (text or "").strip() else 0
     except ValueError:
         hit = -1
     if hit == 0:
-        print("⚠️ [状态] %s 回写未命中任何行（品种可能已被移除）" % code)
+        print("⚠️ [状态] %s 回写未命中任何行（品种可能已被移除）" % usc)
     else:
-        print("[状态] %s 回写成功：%s" % (code, json.dumps(payload, ensure_ascii=False)))
+        print("[状态] %s 回写成功（%s）：%s"
+              % (usc, STATE_TABLE, json.dumps(payload, ensure_ascii=False)))
 
 
 # ============ 分市场时段权重（沿用旧版，now 一律为北京时间） ============
 # isUsDst 为纯日历规则，已抽至 DateTimeUtil.py
+def normalize_market(market):
+    """把市场标识归一为「时段判定口径」：交易所级的 SH/SZ/BJ 归为 A 股整体
+
+    状态视图的 market 是**交易所级**（SH/SZ/BJ），而 A 股三所的交易日时段一致，
+    故统一按 "A" 判定；其余市场标识与大写形态保持一致。
+
+    :param market: 市场标识（视图口径）
+    :return: 归一后的标识（大写）；空值返回 ""（由调用方决定兜底）
+    """
+    key = str(market or "").strip().upper()
+    return "A" if key in CN_EXCHANGES else key
+
+
 def get_market_weight(market, now):
-    """分市场时段权重（与旧版一致；未知市场/周末取低权重，中性兜底 5.0）"""
+    """分市场时段权重（与旧版一致；未知市场/周末取低权重，中性兜底 5.0）
+
+    :param market: 市场标识，可传交易所级（SH/SZ/BJ，会先归一到 A 股口径）
+    """
+    market = normalize_market(market)
     weekday = now.weekday()
     is_weekend = weekday >= 5
     if market == "A":
@@ -240,7 +275,7 @@ def get_market_weight(market, now):
         if now >= trade_start or now <= ext_end:
             return 5.0
         return 1.0
-    if market in ("FX", "FUTURES"):
+    if market in ("FX", "FUTURE"):
         return 1 if is_weekend else 8.0
     if market == "CRYPTO":
         return 8.0
@@ -248,53 +283,66 @@ def get_market_weight(market, now):
 
 
 # ============ 智能调度（指数退避 + 无新数据冷却 + 72h 强制采集） ============
-def select_best_codes(codes, state_map, now, count):
-    """选出本轮要采集的至多 count 个品种
+def resolve_weight_market(usc, state_map):
+    """取该品种用于**时段权重**的市场标识：直接取状态视图的 market
 
-    规则与旧版一致：
+    2026-09-25 起权重与市场都由视图直出（Config.json 已退出），视图的 market 是
+    交易所级（SH/SZ/BJ），由 get_market_weight 内部归一为 A 股口径。
+
+    :return: 市场标识；视图没给则返回 "UNKNOWN"（中性权重 5.0 兜底）
+    """
+    return (state_map.get(usc) or {}).get("market") or "UNKNOWN"
+
+
+def select_best_codes(usc_list, state_map, now, count):
+    """从状态视图取到的品种中选出本轮要采集的至多 count 个
+
+    usc_list 为视图行身份（usc）。规则与旧版一致：
       1) 强制候选（从未采集 / 时间解析失败 / 距上次检查超 72h）按超时长度降序优先；
       2) 强制候选不足 count 时，其余品种按
          score = elapsed × 市场权重 × (base_w × freq_w) / 2^(fail+stale)
          降序补足（惩罚因子 = 2^(count_fail + count_stale)）。
+    其中 base_w / freq_w 取自视图的 weight_priority / weight_frequency（旧版取自
+    Config.json，口径不变）；缺值按 1 处理。
 
-    :return: [{"code","score","reason","reason_detail"}, ...]（强制优先，得分降序）
+    :return: [{"usc","score","reason","reason_detail"}, ...]（强制优先，得分降序）
     """
     # ---------- 强制采集 ----------
     force_candidates = []
-    for code in codes:
-        state = state_map.get(code)
+    for usc in usc_list:
+        state = state_map.get(usc)
         lct_str = state.get("time_last_check") if state else None
         if not lct_str:
-            force_candidates.append((code, float("inf"), "从未采集"))
+            force_candidates.append((usc, float("inf"), "从未采集"))
             continue
         lct_dt = parseDt(lct_str)
         if lct_dt is None:
-            force_candidates.append((code, float("inf"), "时间解析失败"))
+            force_candidates.append((usc, float("inf"), "时间解析失败"))
             continue
         elapsed_check = (now - lct_dt).total_seconds()
         if elapsed_check > FORCE_FETCH_INTERVAL:
             force_candidates.append(
-                (code, elapsed_check, "距上次检查%.1f小时" % (elapsed_check / 3600)))
+                (usc, elapsed_check, "距上次检查%.1f小时" % (elapsed_check / 3600)))
     force_candidates.sort(key=lambda x: x[1], reverse=True)
-    selected = [{"code": c, "score": 0.0, "reason": "force",
+    selected = [{"usc": c, "score": 0.0, "reason": "force",
                  "reason_detail": "强制采集 (超过72小时未检查) - %s" % info}
                 for c, _e, info in force_candidates]
     if len(selected) >= count:
         for s in selected[:count]:
-            print("[调度] 强制采集: %s, %s" % (s["code"], s["reason_detail"]))
+            print("[调度] 强制采集: %s, %s" % (s["usc"], s["reason_detail"]))
         return selected[:count]
 
     # ---------- 收益最大化（指数退避 + 无新数据冷却） ----------
     remaining = count - len(selected)
     scored = []
     log_lines = [
-        "  {'CODE':<6s} {'elapsed':>10s} {'market_w':>8s} {'base_w':>6s} {'freq_w':>6s} "
+        "  {'USC':<6s} {'elapsed':>10s} {'market_w':>8s} {'base_w':>6s} {'freq_w':>6s} "
         "{'static_w':>8s} {'fail':>4s} {'stale':>5s} {'penalty':>8s} {'score':>12s} {'REASON':<20s}"
     ]
-    for code in codes:
-        if any(s["code"] == code for s in selected):
+    for usc in usc_list:
+        if any(s["usc"] == usc for s in selected):
             continue
-        state = state_map.get(code)
+        state = state_map.get(usc)
         last_new_str = state.get("time_last_fetch") if state else None
         count_fail = state.get("count_fail", 0) if state else 0
         count_stale = state.get("count_stale", 0) if state else 0
@@ -302,9 +350,9 @@ def select_best_codes(codes, state_map, now, count):
         last_dt = parseDt(last_new_str, default=shiftDays(now, -30))
 
         elapsed = (now - last_dt).total_seconds()
-        market_weight = get_market_weight(CODE_MARKET.get(code, "UNKNOWN"), now)
-        base_w = CODE_WEIGHT_BASE.get(code, 1)
-        freq_w = CODE_WEIGHT_FREQ.get(code, 1)
+        market_weight = get_market_weight(resolve_weight_market(usc, state_map), now)
+        base_w = _to_weight(state.get("weight_base") if state else None)
+        freq_w = _to_weight(state.get("weight_freq") if state else None)
         total_static_weight = base_w * freq_w
         penalty = 2 ** (count_fail + count_stale)
         score = elapsed * market_weight * total_static_weight / penalty
@@ -327,9 +375,9 @@ def select_best_codes(codes, state_map, now, count):
 
         log_lines.append(
             "  %-6s %10.0f %8.1f %6d %6d %8d %4d %5d %8d %12.1f %-20s"
-            % (code, elapsed, market_weight, base_w, freq_w, total_static_weight,
+            % (usc, elapsed, market_weight, base_w, freq_w, total_static_weight,
                count_fail, count_stale, penalty, score, ",".join(reasons)))
-        scored.append({"code": code, "score": score, "reason": "score",
+        scored.append({"usc": usc, "score": score, "reason": "score",
                        "comp": {"elapsed": elapsed, "market_weight": market_weight,
                                 "base_w": base_w, "freq_w": freq_w,
                                 "count_fail": count_fail, "count_stale": count_stale}})
@@ -359,37 +407,49 @@ def select_best_codes(codes, state_map, now, count):
             parts.append("无特殊优势，默认选择")
         s["reason_detail"] = "收益最大 - %s" % ", ".join(parts)
         print("[调度] 选中品种: %s, 得分: %.1f, 原因: %s"
-              % (s["code"], s["score"], s["reason_detail"]))
+              % (s["usc"], s["score"], s["reason_detail"]))
     selected.extend(picked)
     return selected
 
 
 # ============ 行情采集与文件生成（契约分别见 FtmmQuoteV2WebRestClient.py / MvsvQuoteBuilder.py） ============
-def collect_single(code):
-    """采集单个品种：行情 API → MVSV 落盘；成功返回摘要 dict，失败返回 None"""
+def collect_single(usc, meta):
+    """采集单个品种：行情 API → MVSV 落盘；成功返回摘要 dict，失败返回 None
+
+    文件头部的 Symbol / Region / Market / TimeZone 直接取状态视图的元数据
+    （2026-09-25 起不再依赖 Config.json 关联）；请求代码即 usc（原 secu_code）。
+
+    :param usc: 品种身份（视图主键，同时写入 # SecuCode / # USC 与落点目录）
+    :param meta: load_state 给出的视图元数据（name/region/market/timezone/symbol）
+    """
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     now = nowBeijing()
     # 文件按「一天一个」命名（000985_Min_20260820.mvsv），同一天的重复运行覆盖当日文件
     date_suffix = fmtDateSuffix(now)
     fetch_time = fmtDisplay(now)
-    print("[采集] 开始处理品种: %s，北京时间 %s" % (code, fetch_time))
-    raw = fetchFiveDayMinuteQuote(code)
+    print("[采集] 开始处理品种: %s（名称: %s），北京时间 %s"
+          % (usc, meta.get("name") or "无名称", fetch_time))
+    raw = fetchFiveDayMinuteQuote(usc)
     if not raw:
         return None
     minute_list = extractMinuteList(raw)
     if not minute_list:
-        print("[采集] %s 数据列表为空" % code)
+        print("[采集] %s 数据列表为空" % usc)
         return None
     latest_ts = max(item.get("ts", 0) for item in minute_list) if minute_list else 0
-    # V5 文件契约见 MvsvQuoteBuilder.py：头部 16 行 + 数据行，市场元数据由 Config.json 的 market 决定
-    content = buildMvsvContent(code, minute_list, market=CODE_MARKET.get(code))
-    file_name = buildMvsvFileName(code, date_suffix)
+    # V5 文件契约见 MvsvQuoteBuilder.py：头部 16 行 + 数据行；
+    # 市场元数据（Region/Market/TimeZone/Symbol）为视图直出，本脚本不再做任何推断
+    content = buildMvsvContent(usc, minute_list, market=meta.get("market"),
+                               region=meta.get("region"),
+                               timezone=meta.get("timezone"),
+                               symbol=meta.get("symbol"), usc=usc)
+    file_name = buildMvsvFileName(usc, date_suffix)
     file_path = TEMP_DIR / file_name
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(content)
     print("[采集] 文件保存成功: %s" % file_path)
     return {
-        "code": code,
+        "usc": usc,
         "file_path": str(file_path),
         "content": content,
         "fetch_time": fetch_time,
@@ -420,21 +480,22 @@ def poll_one(client, sel, state_map, now, dry_run):
 
     有新数据 → 重置 fail/stale、推进 fetch 指针；无新数据 → stale+1、fail 清零；
     采集失败 → fail+1。任何分支 dt_last_check 都推进到本次运行时刻。
+    回写走表（STATE_TABLE），过滤键为 usc。
     """
-    code = sel["code"]
-    state = state_map.setdefault(code, {
+    usc = sel["usc"]
+    state = state_map.setdefault(usc, {
         "time_last_check": "", "time_last_fetch": "",
         "ts_latest_data": 0, "count_last_fetch": 0,
         "count_fail": 0, "count_stale": 0,
     })
     state["time_last_check"] = now.isoformat()
 
-    outcome = {"code": code, "reason": sel["reason"],
+    outcome = {"usc": usc, "reason": sel["reason"],
                "reason_detail": sel["reason_detail"],
                "poll_success": False, "upload_success": None,
                "record_count": 0, "error": None}
 
-    result = collect_single(code)
+    result = collect_single(usc, state)
     outcome["poll_success"] = result is not None
 
     if result:
@@ -447,32 +508,32 @@ def poll_one(client, sel, state_map, now, dry_run):
             state["time_last_fetch"] = now.isoformat()
             state["ts_latest_data"] = new_ts
             state["count_last_fetch"] = result["record_count"]
-            print("[状态] %s 有新数据，ts_latest_data=%d" % (code, new_ts))
+            print("[状态] %s 有新数据，ts_latest_data=%d" % (usc, new_ts))
         else:
             state["count_stale"] = _to_int(state.get("count_stale")) + 1
             state["count_fail"] = 0
-            print("[状态] %s 无新数据，count_stale=%d" % (code, state["count_stale"]))
+            print("[状态] %s 无新数据，count_stale=%d" % (usc, state["count_stale"]))
 
         if dry_run:
-            print("[dry_run] 跳过文件递交：%s" % code)
+            print("[dry_run] 跳过文件递交：%s" % usc)
         else:
             fname = Path(result["file_path"]).name
-            path_key = "%s/%s/%s" % (DATA_DIR, code, fname)
-            commit_msg = "[FinvQuoteCollectPollFtmm] %s minute quote data @%s" % (code, result["fetch_time"])
+            path_key = "%s/%s/%s" % (DATA_DIR, usc, fname)
+            commit_msg = "[FinvQuoteCollectPollFtmm] %s minute quote data @%s" % (usc, result["fetch_time"])
             up = upload_to_repo(result["content"], path_key, commit_msg)
             outcome["upload_success"] = up["success"]
             if not up["success"]:
                 outcome["error"] = "递交失败: %s" % up.get("message")
-                EXEC_LOG["errors"].append("%s 递交失败: %s" % (code, up.get("message")))
+                EXEC_LOG["errors"].append("%s 递交失败: %s" % (usc, up.get("message")))
     else:
         state["count_fail"] = _to_int(state.get("count_fail")) + 1
         outcome["error"] = "行情采集失败"
-        print("[状态] %s 采集失败，count_fail=%d" % (code, state["count_fail"]))
+        print("[状态] %s 采集失败，count_fail=%d" % (usc, state["count_fail"]))
 
     if dry_run:
-        print("[dry_run] 跳过状态回写：%s → %s" % (code, json.dumps(state, ensure_ascii=False)))
+        print("[dry_run] 跳过状态回写：%s → %s" % (usc, json.dumps(state, ensure_ascii=False)))
     else:
-        patch_state_row(client, code, state)
+        patch_state_row(client, usc, state)
     return outcome
 
 
@@ -493,8 +554,9 @@ def upload_exec_log():
         "ts": toEpochSeconds(utc_dt),
         "dt": fmtDisplay(bj_dt),
         "state_backend": EXEC_LOG["state_backend"],
+        "state_view": EXEC_LOG["state_view"],
         "state_table": EXEC_LOG["state_table"],
-        "flag_enable": EXEC_LOG["flag_enable"],
+        "state_view_filter": EXEC_LOG["state_view_filter"],
         "poll_count": EXEC_LOG["poll_count"],
         "dry_run": EXEC_LOG["dry_run"],
         "start_time": EXEC_LOG["start_time"],
@@ -515,11 +577,10 @@ def main():
     ensureConsoleUtf8()
     EXEC_LOG["start_time"] = utcNow().isoformat()
     print("======== FinvQuoteCollectPollFtmm 轮询开始 ========")
-    print("模式: %s | 状态表: %s | flag_enable=%s | POLL_COUNT=%d"
-          % ("dry_run 演练" if DRY_RUN else "正常", STATE_TABLE, FLAG_ENABLE, POLL_COUNT))
+    print("模式: %s | 状态视图: %s | 状态表: %s | POLL_COUNT=%d"
+          % ("dry_run 演练" if DRY_RUN else "正常", STATE_VIEW, STATE_TABLE, POLL_COUNT))
+    print("视图筛选口径: %s（客户端不再另加过滤）" % STATE_VIEW_FILTER)
     print("数据落点: %s/%s @ %s（脚本内常量锁定）" % (GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH))
-
-    load_config_meta()
 
     # 凭据：Supabase 由客户端从环境变量解析（缺失抛 ValueError，不打印取值）
     if not DRY_RUN and not GIT_COMMIT_TOKEN:
@@ -542,21 +603,22 @@ def main():
     print("行情端点: 已配置（环境变量 %s，值不打印）" % ENV_API_BASE)
 
     try:
-        codes, state_map = load_state(client)
+        usc_list, state_map = load_state(client)
     except Exception as e:
-        print("❌ 状态表读取失败: %s" % e)
-        EXEC_LOG["errors"].append("state_load: %s" % e)
+        err = _one_line(e)          # PostgREST 的错误响应可能多行且很长，压成单行再落日志
+        print("❌ 状态视图读取失败: %s" % err)
+        EXEC_LOG["errors"].append("state_load: %s" % err)
         return 1
 
-    if not codes:
-        print("状态表中没有 flag_enable=%s 的品种，无事可做" % FLAG_ENABLE)
+    if not usc_list:
+        print("状态视图 %s 中没有可采集的品种，无事可做" % STATE_VIEW)
         return 0
 
     now = nowBeijing()
-    print("[轮询] 当前北京时间: %s, 品种数: %d" % (now.isoformat(), len(codes)))
+    print("[轮询] 当前北京时间: %s, 品种数: %d" % (now.isoformat(), len(usc_list)))
 
-    selected = select_best_codes(codes, state_map, now, POLL_COUNT)
-    EXEC_LOG["selected"] = [{"code": s["code"], "reason": s["reason"],
+    selected = select_best_codes(usc_list, state_map, now, POLL_COUNT)
+    EXEC_LOG["selected"] = [{"usc": s["usc"], "reason": s["reason"],
                              "reason_detail": s["reason_detail"]} for s in selected]
 
     any_fail = False
@@ -565,12 +627,12 @@ def main():
             outcome = poll_one(client, sel, state_map, now, DRY_RUN)
         except Exception as e:
             err = _scrub("%s" % e)
-            outcome = {"code": sel["code"], "reason": sel["reason"],
+            outcome = {"usc": sel["usc"], "reason": sel["reason"],
                        "reason_detail": sel["reason_detail"],
                        "poll_success": False, "upload_success": None,
                        "record_count": 0, "error": "处理异常: %s" % err}
-            EXEC_LOG["errors"].append("%s: %s" % (sel["code"], err))
-            print("❌ [轮询] %s 处理异常: %s" % (sel["code"], err))
+            EXEC_LOG["errors"].append("%s: %s" % (sel["usc"], err))
+            print("❌ [轮询] %s 处理异常: %s" % (sel["usc"], err))
         EXEC_LOG["results"].append(outcome)
         if (not outcome.get("poll_success")) or outcome.get("upload_success") is False:
             any_fail = True

@@ -43,16 +43,21 @@ fromEnv() 即上述环境变量路径；两者任一缺失抛 ValueError（不�
     except ValueError as e:
         print("缺少凭据:", e)
 
+    # 读：从视图取（视图可直出元数据列与状态列；主键 usc）
     rows = json.loads(client.query(
-        "finv_quote_collect_state_poll_futu",
-        "select=secu_code,dt_last_check&%s&order=secu_code.asc" % eqFilter("flag_enable", "1")))
+        "finv_quote_collect_state_poll_futu_view",
+        "select=usc,region,market,timezone,symbol,dt_last_check&order=usc.asc"))
+    # 写：一律落表（视图只读）
     client.patch("finv_quote_collect_state_poll_futu",
-                 eqFilter("secu_code", "HSI"),
+                 eqFilter("usc", "159937"),
                  {"count_fail": 0})
 
 五、注意事项
 ----------------------------------------------------------------------------------------
     - PostgREST 默认单页最多返回 1000 行，行数超过需调用方自行分页；
+    - **视图（读）与表（写）是两条通道**：视图列由视图定义决定，查询里列到不存在的列
+      会直接 400，故调用方的 select 列清单必须与视图定义严格对齐（例如视图不暴露
+      flag_enable 时不要拼该过滤条件）；
     - 响应中的 timestamptz 为 **UTC 偏移的 ISO 字符串**，解析请用 DateTimeUtil.parseDt；
     - 日志中的项目引用一律遮蔽为 ***，密钥不落任何输出。
 
@@ -84,7 +89,7 @@ def eqFilter(column, value):
 
     :param column: 列名
     :param value: 取值（会被 URL 编码，支持非 ASCII 与特殊字符）
-    :return: 可直接拼进查询串的片段，如 secu_code=eq.HSI
+    :return: 可直接拼进查询串的片段，如 usc=eq.HSI
     """
     return "%s=eq.%s" % (column, urllib.parse.quote(str(value), safe=""))
 
@@ -171,7 +176,7 @@ class SupabaseRestClient:
         """按过滤条件更新行（PATCH），返回更新后的行数组原文 JSON
 
         :param table: 表名
-        :param filters: 过滤条件片段（可用 eqFilter 构造），如 secu_code=eq.HSI
+        :param filters: 过滤条件片段（可用 eqFilter 构造），如 usc=eq.HSI
         :param row: 待更新的列 dict（只出现于 dict 的列会被更新）
         :return: 响应原文（[] 表示未命中任何行）
         :raises SupabaseRestError: 网络错误或响应非 2xx
