@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # GitHubCommitContent 只使用其公开递交能力；HTTP 收发走 HttpUtil、控制台编码走 ConsoleUtil
 from GitHubCommitContent import commit_content
 from ConsoleUtil import ensureConsoleUtf8
-from MvsvQuoteBuilder import buildMvsvContent, buildMvsvFileName, extractSummary
+from MvsvQuoteBuilder import buildMvsvContent, buildMvsvFileName
 from FtmmQuoteV2WebRestClient import (ENV_API_BASE, extractMinuteList,
                                       fetchFiveDayMinuteQuote, isApiBaseUsable,
                                       maskApiUrl, resolveApiBase)
@@ -376,14 +376,13 @@ def collect_single(code):
     raw = fetchFiveDayMinuteQuote(code)
     if not raw:
         return None
-    data_node = raw["data"]
     minute_list = extractMinuteList(raw)
     if not minute_list:
         print("[采集] %s 数据列表为空" % code)
         return None
     latest_ts = max(item.get("ts", 0) for item in minute_list) if minute_list else 0
-    summary = extractSummary(data_node)
-    content = buildMvsvContent(code, minute_list, summary, fetch_time)
+    # V5 文件契约见 MvsvQuoteBuilder.py：头部 16 行 + 数据行，市场元数据由 Config.json 的 market 决定
+    content = buildMvsvContent(code, minute_list, market=CODE_MARKET.get(code))
     file_name = buildMvsvFileName(code, date_suffix)
     file_path = TEMP_DIR / file_name
     with open(file_path, "w", encoding="utf-8") as f:
