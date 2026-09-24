@@ -16,7 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from GitHubCommitContent import commit_content
 from ConsoleUtil import ensureConsoleUtf8
 from MvsvQuoteBuilder import buildMvsvContent, buildMvsvFileName, extractSummary
-from FtmmQuoteV2WebRestClient import fetchFiveDayMinuteQuote, extractMinuteList
+from FtmmQuoteV2WebRestClient import (ENV_API_BASE, extractMinuteList,
+                                      fetchFiveDayMinuteQuote, isApiBaseUsable,
+                                      resolveApiBase)
 from DateTimeUtil import (fmtDisplay, fmtTsSuffix, isUsDst, nowBeijing,
                            parseDt, shiftDays, toEpochSeconds, utcNow)
 from SupabaseRestClient import SupabaseRestClient, SupabaseRestError, eqFilter
@@ -514,6 +516,15 @@ def main():
         print("❌ Supabase 凭据缺失: %s" % e)
         return 1
 
+    # 行情端点自检：未配置就在这里失败，避免白跑一轮才在采集阶段炸
+    # （端点值可能含机密，只报「已配置/未配置」，不打印取值）
+    api_base = resolveApiBase()
+    if not isApiBaseUsable(api_base):
+        print("❌ 行情 API 端点未配置或非法：请在仓库 secrets/vars 配置 %s"
+              "（值为完整 http(s) 端点）；当前解析结果不是合法 URL" % ENV_API_BASE)
+        return 1
+    print("行情端点: 已配置（环境变量 %s，值不打印）" % ENV_API_BASE)
+
     try:
         codes, state_map = load_state(client)
     except Exception as e:
@@ -553,7 +564,9 @@ def main():
     print("======== FinvQuoteCollectPollFtmm轮询结束 ========")
     print("合计: 选中 %d，作业成功 %d，递交成功 %d%s"
           % (len(EXEC_LOG["results"]), poll_ok, upload_ok,
-             ("，递交跳过 %d（dry_run）" % upload_skip) if upload_skip else ""))
+             ("，递交未发生 %d（%s）" % (upload_skip,
+                                    "dry_run 演练" if DRY_RUN else "采集未成功，未进入递交"))
+             if upload_skip else ""))
     return 1 if any_fail else 0
 
 

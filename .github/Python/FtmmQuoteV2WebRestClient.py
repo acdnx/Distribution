@@ -26,8 +26,12 @@ FtmmQuoteV2WebRestClient —— FTMM 行情 V2 Web REST 接口客户端（纯标
 | 输入      | 优先级                                                            |
 |-----------|-------------------------------------------------------------------|
 | base_url  | 1) 调用方显式传入的参数（局部覆盖，便于测试或同脚本多端点）        |
-|           | 2) 环境变量 API_BASE（经 GitHub Actions secrets/vars 注入）         |
-|           | 3) 内置默认端点 DEFAULT_API_BASE（旧版 Poll.py 沿用的 Futu 分钟线）|
+|           | 2) 环境变量 LAMBDA_FTMM_API_BASE（主用；secrets/vars 注入）         |
+|           | 3) 环境变量 API_BASE（兼容旧名；主用未配置时才回落）                |
+|           | 4) 占位符 DEFAULT_API_BASE（===LAMBDA_FTMM_API_BASE===，**不可请求**）|
+
+⚠️ 端点属运行机密，**代码内不写死真实端点**：DEFAULT_API_BASE 只是「未配置」的可见标记，
+不是可用端点。拿到解析值后必须先用 isApiBaseUsable 判定，否则请求会失败。
 
 三、返回值契约（与旧版 Poll.py 一致，调用方无需改判读逻辑）
 ----------------------------------------------------------------------------------------
@@ -40,7 +44,10 @@ FtmmQuoteV2WebRestClient —— FTMM 行情 V2 Web REST 接口客户端（纯标
 
 四、环境变量
 ----------------------------------------------------------------------------------------
-    API_BASE   选填   行情 API 端点（未配置时使用内置默认端点；端点常以 secret 注入）
+    LAMBDA_FTMM_API_BASE  必填   行情 API 端点（主用；在仓库 Settings → Secrets and
+                                 variables → Actions 里配成 secret，避免明文入日志）
+    API_BASE              兼容   旧名；仅当主用未配置时回落读取
+    两者都未配置 → 解析为占位符，isApiBaseUsable 判定 False，请求直接失败。
 
 五、使用示例（同目录脚本）
 ----------------------------------------------------------------------------------------
@@ -67,10 +74,15 @@ import urllib.parse
 from HttpUtil import parseJson, sendRequest
 
 # ============ 端点与请求常量 ============
-# 端点环境变量名（约定专用）
+# 端点环境变量名（约定专用，主用）
 ENV_API_BASE = "LAMBDA_FTMM_API_BASE"
-# 内置默认端点（旧版 Poll.py 沿用的 Futu 分钟线端点）
-DEFAULT_API_BASE = "===LAMBDA_FTMM_API_BASE==="
+# 端点环境变量名（兼容旧名；主用未配置时才回落读它）
+ENV_API_BASE_FALLBACK = "API_BASE"
+# 「未配置」占位符：不是可用端点，仅供日志自证与 isApiBaseUsable 判定。
+# 端点属运行机密，不写死在代码里，必须由 secrets/vars 注入。
+DEFAULT_API_BASE = "===%s===" % ENV_API_BASE
+# 合法端点协议前缀
+URL_SCHEMES = ("http://", "https://")
 # 单次请求默认超时（秒）
 DEFAULT_TIMEOUT = 30
 # 请求头 User-Agent
@@ -82,15 +94,30 @@ SUCCESS_CODE = 1
 
 
 def resolveApiBase(base_url=None):
-    """解析行情 API 端点：参数 → 环境变量 API_BASE → 内置默认端点
+    """解析行情 API 端点：参数 → 环境变量 LAMBDA_FTMM_API_BASE → 兼容旧名 API_BASE → 占位符
 
-    :param base_url: 调用方显式传入的端点；None 时走环境变量 / 默认值
+    注意：本函数**不校验**可用性。未配置任何环境变量时返回占位符 DEFAULT_API_BASE
+    （形如 ===LAMBDA_FTMM_API_BASE===，不是合法 URL），调用方应先用
+    isApiBaseUsable 判定，避免把占位符当端点发出请求。
+
+    :param base_url: 调用方显式传入的端点；None 时走环境变量 / 占位符
     :return: 端点字符串（已 strip，末尾不带 /）
     """
-    for candidate in ((base_url or "").strip(), os.environ.get(ENV_API_BASE, "").strip()):
+    for candidate in ((base_url or "").strip(),
+                      os.environ.get(ENV_API_BASE, "").strip(),
+                      os.environ.get(ENV_API_BASE_FALLBACK, "").strip()):
         if candidate:
             return candidate.rstrip("/")
     return DEFAULT_API_BASE
+
+
+def isApiBaseUsable(base):
+    """判断端点是否已配置且形态合法（http/https）
+
+    :param base: 端点字符串（通常来自 resolveApiBase）
+    :return: True 可发起请求；False 为未配置占位符或非法形态
+    """
+    return isinstance(base, str) and base.startswith(URL_SCHEMES)
 
 
 def fetchFiveDayMinuteQuote(secu_code, base_url=None, timeout=DEFAULT_TIMEOUT):
@@ -102,7 +129,15 @@ def fetchFiveDayMinuteQuote(secu_code, base_url=None, timeout=DEFAULT_TIMEOUT):
     :return: 成功 → API 原始 JSON dict（已校验 code == 1 且 data 非空）；
              失败 → None（不抛异常，诊断信息已 print）
     """
-    url = "%s?%s=%s" % (resolveApiBase(base_url), PARAM_SECU_CODE,
+    base = resolveApiBase(base_url)
+    if not isApiBaseUsable(base):
+        # 端点未配置（占位符）或形态非法：明确报错并走失败契约，
+        # 不让 urllib 抛 "unknown url type" 这类无信息量的异常
+        print("[行情] 端点未配置或非法（解析值: %s）；请在仓库 secrets/vars 配置环境变量 %s，"
+              "值为完整 http(s) 端点（如 https://host/API/Futu/Quote/Minute）"
+              % (base, ENV_API_BASE))
+        return None
+    url = "%s?%s=%s" % (base, PARAM_SECU_CODE,
                         urllib.parse.quote(str(secu_code), safe=""))
     print("[行情] 请求数据: %s" % url)
     status, text, err = sendRequest("GET", url, headers={"User-Agent": USER_AGENT},

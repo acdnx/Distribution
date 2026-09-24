@@ -10,7 +10,7 @@
 # 数据链路：
 #   状态表  Supabase PG finv_quote_collect_state_poll_futu（flag_enable='1' 参与轮询，
 #           读取 + 回写均经 PostgREST；dt_update 由表上触发器自动维护）
-#   行情    API_BASE（secrets 注入；未配置时回落脚本内置端点）→ 分钟线 JSON
+#   行情    LAMBDA_FTMM_API_BASE（secrets 注入；必填，未配置直接失败）→ 分钟线 JSON
 #   产物    MVSV → Contents API 递交 ACANX/Distribution @ quote :
 #           Data/Finv/SecuQuote/{code}/{code}_Min_{yyyyMMdd_HHmmss}.mvsv
 #           （目标仓库/分支由脚本内常量锁定，与本仓库 acdnx/Distribution 无关）
@@ -20,8 +20,10 @@
 #   SUPABASE_PROJECT_REF / SUPABASE_KEY  Supabase 凭据（读 / 回写状态表）
 #   GIT_COMMIT_TOKEN                     GitHub 令牌（需 ACANX/Distribution 的
 #                                        contents:write 权限）
-#   API_BASE                             行情 API 端点（secrets 优先，回落 vars，
-#                                        均未配置时用脚本内置默认端点）
+#   LAMBDA_FTMM_API_BASE                 行情 API 端点（**必填**；secrets 优先回落 vars。
+#                                        名字必须与客户端 ENV_API_BASE 一致，否则会解析成
+#                                        占位符 ===LAMBDA_FTMM_API_BASE=== 而请求失败）
+#                                        （旧名 API_BASE 仍兼容，但不再作为主用）
 #
 # 退出码语义（脚本约定）：0 = 成功（含无启用品种 / dry_run）；1 = 致命错误
 # 或任一选中品种采集/递交失败（状态回写与执行日志在任何情况下都先完成再退出）。
@@ -87,7 +89,10 @@ jobs:
           # 必填：GitHub 写仓库令牌（经 Contents API 递交 MVSV / 日志到
           # ACANX/Distribution@quote；dry_run 模式可不配）
           GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
-          # 选填：行情 API 端点（secrets 优先，回落 vars，均未配置用脚本默认值）
+          # 行情 API 端点（secrets 优先，回落 vars；端点属机密，必须用 secret 注入）
+          # 主用名与客户端 ENV_API_BASE 一致；未配置时脚本会直接失败并提示
+          LAMBDA_FTMM_API_BASE: ${{ secrets.LAMBDA_FTMM_API_BASE || vars.LAMBDA_FTMM_API_BASE }}
+          # 兼容旧名：仅当主用未配置时客户端才回落读它
           API_BASE: ${{ secrets.API_BASE || vars.API_BASE }}
           # 演练开关（来自 workflow 输入）
           POLL_DRY_RUN: ${{ inputs.dry_run || 'false' }}
