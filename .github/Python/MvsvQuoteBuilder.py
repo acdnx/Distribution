@@ -44,6 +44,11 @@ MvsvQuoteBuilder —— MVSV 行情数据文件生成契约库（V5 格式）
       Config.json 兼容路径**，故老调用（只传 market=）行为不变、不回归。
       Market 取值形态随之由「A」变为交易所级（SZ / SH / BJ），
       故新增 CURRENCY_BY_MARKET 覆盖交易所级标识。
+    - 2026-09-25：`# Name` 由「恒为空」改为**填入证券名称**，取值来源为状态视图
+      `finv_quote_collect_state_poll_futu_view` 的 `name_sc` 列（用户要求）。
+      头部行结构对换行敏感，故本库在写头部时**统一把名称压成单行**（换行 → 空格、
+      去两端空白），任何调用方传入的名称都不会破坏「头部 16 行」的契约。
+      名称为空（视图未给）时该行仍为空，行为与旧版一致。
 
 形态说明：
     - 纯函数库，没有命令行入口；import 无副作用、不触网；
@@ -68,7 +73,7 @@ MvsvQuoteBuilder —— MVSV 行情数据文件生成契约库（V5 格式）
     # Symbol : {完整符号，如 SZ.159937（视图直出）}
     # SecuCode : {usc}
     # USC : {usc}
-    # Name : {名称，恒为空（视图有 name_sc 但样例口径为空，是否启用待用户确认）}
+    # Name : {证券名称，取自视图 name_sc；写入前统一压成单行，视图未给则为空}
     # Region : {区域，如 CN（视图直出）}
     # Market : {市场，如 SZ（视图直出，交易所级）}
     # TimeZone : {IANA 时区标识，如 Asia/Shanghai（视图直出，见「三」）}
@@ -342,6 +347,15 @@ def _fmt(value):
     return "" if value is None else str(value)
 
 
+def _single_line(text):
+    """把要写进头部的文本压成单行（名称里的换行会破坏「头部 16 行」结构）
+
+    只做「去换行 + 去两端空白」，**不动内部空格**（中文名里可能出现全角空格，
+    不做归一以免改写数据）。库侧统一兜底，故任何调用方传入的名称都安全。
+    """
+    return str(text or "").replace("\r", " ").replace("\n", " ").strip()
+
+
 def _build_data_rows(minute_list):
     """把数据源分钟行映射为 V5 的 12 字段数据行（规则见模块文档「二、4」）"""
     # ts -> 收盘价 索引：lc 按**时间口径**取 ts−60（前一分钟）记录的收盘价，
@@ -386,7 +400,8 @@ def buildMvsvContent(secu_code, minute_list, market=None, name="", period="Min",
     :param secu_code: 证券代码（写入 # SecuCode；视图路径下一般与 usc 同值）
     :param minute_list: 分钟数据行列表（数据源原始 dict 列表，含 ts/c/v/t/cr/cp 键）
     :param market: 市场标识（视图直出为交易所级 SH/SZ/BJ/…；兼容路径为 A/HK/US/…）
-    :param name: 证券名称；**恒为空**（视图有 name_sc，但样例口径为空，是否启用待确认）
+    :param name: 证券名称（正常运行时取自状态视图的 name_sc）；库侧会压成单行，
+                 传空则 # Name 留空
     :param period: 数据周期标识，默认 Min（写入 # TypeKLine 与标题）
     :param timezone: IANA 时区标识（视图直出，如 Asia/Shanghai）；
                      留空则按 market / 地区取缺省，查不到仍留空
@@ -409,7 +424,7 @@ def buildMvsvContent(secu_code, minute_list, market=None, name="", period="Min",
         "# Symbol : %s" % meta["symbol"],
         "# SecuCode : %s" % secu_code,
         "# USC : %s" % (usc or secu_code),
-        "# Name : %s" % name,
+        "# Name : %s" % _single_line(name),
         "# Region : %s" % meta["region"],
         "# Market : %s" % meta["market"],
         "# TimeZone : %s" % tz,

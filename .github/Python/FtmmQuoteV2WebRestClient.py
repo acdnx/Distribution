@@ -134,9 +134,14 @@ def maskApiUrl(url):
         - **域名**只保留前 HOST_KEEP 个字符，其余（含完整域名与端口）打码；
         - **路径前缀**逐段打码，只保留末尾 PATH_TAIL_KEEP 段（资源名，便于确认调用的是哪个接口）。
 
-    示例：
-        https://minquote.103456.xyz/API/Futu/Quote/Minute?secuCode=517400
-          → https://mi***/***/***/***/Minute?secuCode=517400
+    示例（**全部为虚构值**：保留域名 + 与真实端点无任何重合的主机前缀与路径）：
+        https://api.example.com/v1/market/minute/list?code=517400
+          → https://ap***/***/***/***/list?code=517400
+
+    ⚠️ 本函数本身就是「端点不落明文」的一环，故**文档与注释里同样不得出现真实端点**：
+    主机名（**含自定义子域前缀**）、路径、参数名一律不得复用真实值——
+    只换顶级域而留着真实子域，照样等于泄漏（打码本就保留主机名前 2 字符，两头一对即被猜出；
+    连「不要这样写」的反面示例里都不该照抄真实子域）。举例请用 example.com 之类的保留域名 + 自拟通用路径。
 
     :param url: 完整请求 URL（也可以是端点 base）
     :return: 打码后的字符串
@@ -180,7 +185,7 @@ def fetchFiveDayMinuteQuote(secu_code, base_url=None, timeout=DEFAULT_TIMEOUT):
         # 占位符可直接展示（它就是「未配置」的标记）；真实端点值一律打码后再打印
         shown = base if base == DEFAULT_API_BASE else maskApiUrl(base)
         print("[行情] 端点未配置或非法（解析值: %s）；请在仓库 secrets/vars 配置环境变量 %s，"
-              "值为完整 http(s) 端点（如 https://host/API/Futu/Quote/Minute）"
+              "值为完整 http(s) 端点（如 https://api.example.com/v1/market/minute）"
               % (shown, ENV_API_BASE))
         return None
     url = "%s?%s=%s" % (base, PARAM_SECU_CODE,

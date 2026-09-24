@@ -41,7 +41,7 @@ FORCE_FETCH_INTERVAL = 72 * 3600          # 距上次检查超过 72 小时强�
 # Supabase 凭据由 SupabaseRestClient 从环境变量读取（不在此处留存副本）
 GIT_COMMIT_TOKEN = os.environ.get("GIT_COMMIT_TOKEN", "").strip()
 # 状态读取源 = 视图（列口径见 STATE_VIEW_COLUMNS；视图直出 region/market/timezone/
-# symbol/weight_priority/weight_frequency，故本作业**不再依赖任何外部配置文件**）
+# symbol/name_sc/weight_priority/weight_frequency，故本作业**不再依赖任何外部配置文件**）
 STATE_VIEW = os.environ.get("POLL_STATE_VIEW",
                             "finv_quote_collect_state_poll_futu_view").strip()
 # 状态回写目标 = 表（视图只读，更新一律落表）
@@ -157,7 +157,7 @@ def load_state(client):
             continue
         usc_list.append(usc)
         state_map[usc] = {
-            # —— MVSV 头部元数据（视图直出；name 仅用于日志，# Name 仍按样例恒空） ——
+            # —— MVSV 头部元数据（视图直出；name ← name_sc，同时用于日志与 # Name） ——
             "usc": usc,
             "name": str(row.get("name_sc") or "").strip(),
             "region": str(row.get("region") or "").strip(),
@@ -416,7 +416,7 @@ def select_best_codes(usc_list, state_map, now, count):
 def collect_single(usc, meta):
     """采集单个品种：行情 API → MVSV 落盘；成功返回摘要 dict，失败返回 None
 
-    文件头部的 Symbol / Region / Market / TimeZone 直接取状态视图的元数据
+    文件头部的 Symbol / Name / Region / Market / TimeZone 直接取状态视图的元数据
     （2026-09-25 起不再依赖 Config.json 关联）；请求代码即 usc（原 secu_code）。
 
     :param usc: 品种身份（视图主键，同时写入 # SecuCode / # USC 与落点目录）
@@ -442,7 +442,8 @@ def collect_single(usc, meta):
     content = buildMvsvContent(usc, minute_list, market=meta.get("market"),
                                region=meta.get("region"),
                                timezone=meta.get("timezone"),
-                               symbol=meta.get("symbol"), usc=usc)
+                               symbol=meta.get("symbol"), usc=usc,
+                               name=meta.get("name"))
     file_name = buildMvsvFileName(usc, date_suffix)
     file_path = TEMP_DIR / file_name
     with open(file_path, "w", encoding="utf-8") as f:
