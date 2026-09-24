@@ -1,0 +1,94 @@
+# ============================================================================
+# quote.FinvQuoteCollectPollFtmm —— Futu 分钟行情轮询采集 V1（Poll.py 的 GitHub Actions 重构版）
+# ----------------------------------------------------------------------------
+# ⚠️ 放置说明：本文件当前随脚本一起提交在 sche 分支（开发阶段），仅 workflow_dispatch
+#    手动触发驱动。转正式定时任务时：
+#      1) 把本文件移入默认分支 dev 的 .github/workflows/（schedule 只在默认分支生效）；
+#      2) 在 on: 下补 schedule: - cron: '...'（GitHub cron 一律按 UTC 解释）；
+#      3) 把 branch 输入的默认值改成脚本常驻的分支。
+#
+# 数据链路：
+#   状态表  Supabase PG finv_quote_collect_state_poll_futu（flag_enable='1' 参与轮询，
+#           读取 + 回写均经 PostgREST；dt_update 由表上触发器自动维护）
+#   行情    API_BASE（secrets 注入；未配置时回落脚本内置端点）→ 分钟线 JSON
+#   产物    MVSV → Contents API 递交 ACANX/Distribution @ quote :
+#           Data/Finv/SecuQuote/{code}/{code}_Min_{yyyyMMdd_HHmmss}.mvsv
+#           （目标仓库/分支由脚本内常量锁定，与本仓库 acdnx/Distribution 无关）
+#   日志    同仓库 quote : Data/Finv/SecuQuoteExecLog/{yyyyMMdd_HHmmss}.log
+#
+# 必需 Secrets / Variables：
+#   SUPABASE_PROJECT_REF / SUPABASE_KEY  Supabase 凭据（读 / 回写状态表）
+#   GIT_COMMIT_TOKEN                     GitHub 令牌（需 ACANX/Distribution 的
+#                                        contents:write 权限）
+#   API_BASE                             行情 API 端点（secrets 优先，回落 vars，
+#                                        均未配置时用脚本内置默认端点）
+#
+# 退出码语义（脚本约定）：0 = 成功（含无启用品种 / dry_run）；1 = 致命错误
+# 或任一选中品种采集/递交失败（状态回写与执行日志在任何情况下都先完成再退出）。
+# ============================================================================
+
+name: quote.FinvQuoteCollectPollFtmm
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 检出分支（需包含 .github/Python/FinvQuoteCollectPollFtmm.py 及同目录依赖模块）
+        type: string
+        required: false
+        default: sche
+      dry_run:
+        description: 演练模式（只选品与采集落盘，不递交文件、不回写状态、不上传日志）
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+        required: false
+        default: 'false'
+
+# 同一时刻只允许一条轮询链路在跑：并发运行会对同一品种的状态字段互相覆盖
+concurrency:
+  group: FinvQuoteCollectPollFtmm
+  cancel-in-progress: false
+
+jobs:
+  FinvQuoteCollectPollFtmm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      # 开发阶段手动触发：检出分支默认 sche（脚本与工作流所在分支）
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || 'sche' }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      # 先把本次运行的有效参数打进日志：日志自证，避免「改了配置没生效」靠猜
+      - name: 打印运行参数
+        run: |
+          echo "触发方式   : ${{ github.event_name }}"
+          echo "检出分支   : ${{ inputs.branch || 'sche' }}"
+          echo "DRY_RUN    : ${{ inputs.dry_run || 'false' }}"
+          echo "数据落点   : ACANX/Distribution @ quote（脚本内常量锁定）"
+          echo "单次采集数 : POLL_COUNT（脚本内常量定义，当前为 1）"
+          echo "状态表     : finv_quote_collect_state_poll_futu（flag_enable='1'）"
+
+      - name: 执行轮询采集
+        env:
+          # 必填：Supabase 凭据（PostgREST 读 / 回写状态表）
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # 必填：GitHub 写仓库令牌（经 Contents API 递交 MVSV / 日志到
+          # ACANX/Distribution@quote；dry_run 模式可不配）
+          GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
+          # 选填：行情 API 端点（secrets 优先，回落 vars，均未配置用脚本默认值）
+          API_BASE: ${{ secrets.API_BASE || vars.API_BASE }}
+          # 演练开关（来自 workflow 输入）
+          POLL_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: python3 .github/Python/FinvQuoteCollectPollFtmm.py
