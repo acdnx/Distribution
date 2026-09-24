@@ -17,9 +17,14 @@ from GitHubCommitContent import commit_content
 from ConsoleUtil import ensureConsoleUtf8
 from MvsvQuoteBuilder import (CN_EXCHANGES, buildMvsvContent,
                               buildMvsvFileName)
-from FtmmQuoteV2WebRestClient import (ENV_API_BASE, extractMinuteList,
-                                      fetchFiveDayMinuteQuote, isApiBaseUsable,
-                                      maskApiUrl, resolveApiBase)
+# 行情客户端门面：模式归口为 FtmmQuoteV2WebRestClient 顶部的 QUOTE_FETCH_MODE 常量
+# （纯常量开关，不读环境变量），作业侧只依赖统一契约；
+# resolveApiBase / isApiBaseUsable / maskApiUrl 仍用于日志擦除（_scrub），与模式无关。
+from FtmmQuoteV2WebRestClient import (ENV_API_BASE, MODE_MOOMOO, MOOMOO_CLIENT_MODULE,
+                                      currentQuoteMode, describeQuoteSource,
+                                      extractMinuteList, fetchFiveDayMinuteQuote,
+                                      isApiBaseUsable, isQuoteSourceReady, maskApiUrl,
+                                      resolveApiBase)
 from DateTimeUtil import (fmtDateSuffix, fmtDisplay, fmtTsSuffix, isUsDst, nowBeijing,
                            parseDt, shiftDays, toEpochSeconds, utcNow)
 from SupabaseRestClient import SupabaseRestClient, SupabaseRestError, eqFilter
@@ -36,10 +41,25 @@ LOG_DIR = "Data/Finv/SecurityQuoteV5/ExecLog"    # 执行日志落点目录
 # 单次运行采集的标的数量。按需求写死在此，后续如需调整直接改这里。
 POLL_COUNT = 3
 FORCE_FETCH_INTERVAL = 72 * 3600          # 距上次检查超过 72 小时强制采集（秒）
+# 时钟异常容忍（秒）：状态列时间戳比「本次运行时刻」超前超过该阈值，即视为脏值。
+# 背景（2026-09-25 实测定案）：状态表 finv_quote_collect_state_poll_futu 是**跨数据源共享**
+# 的（Futu 侧作业也在写同一张表，证据：NVDA/688050 等非 FTMM 行与本作业的 FTMM 行出现过
+# 微秒级完全相同的时间戳，且 GCMain 的 dt_last_check 实测落在未来 ~7 分钟）。一旦这种
+# 「未来时间戳」落到本作业读到的品种上，会同时造成两处失效：
+#   · 打分侧 elapsed 为负 → score 为负 → 该品种永远排在最后，选不中；
+#   · 强制侧 elapsed_check 为负 → 永远不 > 72h → 强制采集也不触发。
+# 两者叠加 = **永久饥饿**（选不中 ⇒ 时间戳永不推进 ⇒ 自锁）。故超前超过阈值的状态一律
+# 按「不可信」处理：强制重采一次，回写时用本次 now 覆盖（自愈）。阈值取得小（60s）是为了
+# 让异常尽快自愈；正常 NTP 抖动远小于此，不会误触发。
+CLOCK_SKEW_TOLERANCE = 60
 
 # ============ 环境变量 ============
 # Supabase 凭据由 SupabaseRestClient 从环境变量读取（不在此处留存副本）
 GIT_COMMIT_TOKEN = os.environ.get("GIT_COMMIT_TOKEN", "").strip()
+# 行情获取模式由 FtmmQuoteV2WebRestClient 顶部的 QUOTE_FETCH_MODE 常量归口
+# （**纯常量开关，不读环境变量**：MODE_CFP_ENDPOINT=1 为原有端点行为 / MODE_MOOMOO=2 直连 moomoo）；
+# 本作业**不解析该值**，只经 isQuoteSourceReady（启动自检）与 describeQuoteSource（日志）使用；
+# 两种模式的对外契约相同（成功同结构 dict / 失败 None），作业侧采集代码无需区分。
 # 状态读取源 = 视图（列口径见 STATE_VIEW_COLUMNS；视图直出 region/market/timezone/
 # symbol/name_sc/weight_priority/weight_frequency，故本作业**不再依赖任何外部配置文件**）
 STATE_VIEW = os.environ.get("POLL_STATE_VIEW",
@@ -70,7 +90,9 @@ EXEC_LOG: Dict[str, object] = {
     "state_view": STATE_VIEW,
     "state_table": STATE_TABLE,
     "state_view_filter": STATE_VIEW_FILTER,
+    "quote_mode": None,        # 行情获取模式描述（运行期由 describeQuoteSource 填入，便于切换期回溯）
     "poll_count": POLL_COUNT,
+    "clock_skew": [],          # 状态时间戳落在未来的品种（他源写入/时钟异常），见 CLOCK_SKEW_TOLERANCE
     "selected": [],
     "results": [],
     "errors": [],
@@ -102,6 +124,24 @@ def _to_weight(value, default=1):
 def _one_line(text):
     """把文案压成单行并截断（PostgREST 的错误响应可能多行且很长）"""
     return " ".join(str(text).split())[:200]
+
+
+def _future_seconds(value, now):
+    """判断时间戳相对 now 是否「落在未来」，是则返回超前的秒数，否则返回 None
+
+    用于识别**时钟异常/他源写入**造成的脏状态（见 CLOCK_SKEW_TOLERANCE 的说明）。
+    无法解析或为空 → None（与「时间解析失败」分支的语义一致，交由调用方另行处理）。
+    超前量不超过阈值（正常时钟抖动）也返回 None，避免无谓的强制采集。
+
+    :param value: 状态列原始时间戳（ISO 字符串，可为 None）
+    :param now: 本次运行时刻（tz-aware）
+    :return: 超前秒数（float），或 None
+    """
+    dt = parseDt(value)
+    if dt is None:
+        return None
+    ahead = (dt - now).total_seconds()
+    return ahead if ahead > CLOCK_SKEW_TOLERANCE else None
 
 
 def _scrub(text):
@@ -298,20 +338,39 @@ def select_best_codes(usc_list, state_map, now, count):
     """从状态视图取到的品种中选出本轮要采集的至多 count 个
 
     usc_list 为视图行身份（usc）。规则与旧版一致：
-      1) 强制候选（从未采集 / 时间解析失败 / 距上次检查超 72h）按超时长度降序优先；
+      1) 强制候选（从未采集 / 时间解析失败 / 时间落在未来 / 距上次检查超 72h）
+         按超时长度降序优先；
       2) 强制候选不足 count 时，其余品种按
          score = elapsed × 市场权重 × (base_w × freq_w) / 2^(fail+stale)
          降序补足（惩罚因子 = 2^(count_fail + count_stale)）。
     其中 base_w / freq_w 取自视图的 weight_priority / weight_frequency（旧版取自
     Config.json，口径不变）；缺值按 1 处理。
 
+    **时钟异常（时间戳落在未来）**：状态表跨数据源共享，他源可能写入超前的时间戳
+    （实测见 CLOCK_SKEW_TOLERANCE 注释）。这类状态一律视为不可信 → 强制重采一次，
+    由 poll_one 用本次 now 覆盖两个时间指针，从而自愈；打分侧同时把 elapsed 钳到 0，
+    双保险避免负分把品种永久压到队尾。
+
     :return: [{"usc","score","reason","reason_detail"}, ...]（强制优先，得分降序）
     """
     # ---------- 强制采集 ----------
     force_candidates = []
+    skewed = []                      # [(usc, 超前秒数, 来源列名)]，仅用于告警输出
     for usc in usc_list:
         state = state_map.get(usc)
         lct_str = state.get("time_last_check") if state else None
+        # 时钟异常优先判定：两个时间指针任一落在未来都不可信（判断须早于 72h 比较，
+        # 否则负的 elapsed_check 永远不会 > FORCE_FETCH_INTERVAL）
+        ahead = _future_seconds(lct_str, now)
+        src_col = "dt_last_check"
+        if ahead is None:
+            ahead = _future_seconds(state.get("time_last_fetch") if state else None, now)
+            src_col = "dt_last_fetch"
+        if ahead is not None:
+            skewed.append((usc, ahead, src_col))
+            force_candidates.append(
+                (usc, float("inf"), "时间落在未来(时钟异常) %s 超前%.0f秒" % (src_col, ahead)))
+            continue
         if not lct_str:
             force_candidates.append((usc, float("inf"), "从未采集"))
             continue
@@ -323,9 +382,17 @@ def select_best_codes(usc_list, state_map, now, count):
         if elapsed_check > FORCE_FETCH_INTERVAL:
             force_candidates.append(
                 (usc, elapsed_check, "距上次检查%.1f小时" % (elapsed_check / 3600)))
+    if skewed:
+        print("⚠️ [调度] 检测到 %d 个品种的状态时间戳落在未来（状态表可能被他源写入/时钟异常），"
+              "本轮强制重采以自愈：" % len(skewed))
+        for usc, ahead, src_col in skewed:
+            print("     %s  %s 超前 %.0f 秒" % (usc, src_col, ahead))
+        # 落执行日志（会上传到 quote 分支持久留存），便于事后确认自愈是否生效
+        EXEC_LOG["clock_skew"] = [{"usc": u, "source": c, "ahead_seconds": round(a, 1)}
+                                  for u, a, c in skewed]
     force_candidates.sort(key=lambda x: x[1], reverse=True)
     selected = [{"usc": c, "score": 0.0, "reason": "force",
-                 "reason_detail": "强制采集 (超过72小时未检查) - %s" % info}
+                 "reason_detail": "强制采集 - %s" % info}
                 for c, _e, info in force_candidates]
     if len(selected) >= count:
         for s in selected[:count]:
@@ -349,7 +416,10 @@ def select_best_codes(usc_list, state_map, now, count):
         # 从未采集 / 解析失败 → 按 30 天前计（旧版口径）
         last_dt = parseDt(last_new_str, default=shiftDays(now, -30))
 
-        elapsed = (now - last_dt).total_seconds()
+        raw_elapsed = (now - last_dt).total_seconds()
+        # 负 elapsed 会让 score 为负 → 该品种永久排在队尾却又不满足强制条件（自锁饥饿），
+        # 故统一钳到 0；真正的自愈由上面的强制分支负责，这里只是兜底。
+        elapsed = max(0.0, raw_elapsed)
         market_weight = get_market_weight(resolve_weight_market(usc, state_map), now)
         base_w = _to_weight(state.get("weight_base") if state else None)
         freq_w = _to_weight(state.get("weight_freq") if state else None)
@@ -360,6 +430,10 @@ def select_best_codes(usc_list, state_map, now, count):
         reasons = []
         if elapsed > 3600:
             reasons.append("long_elapsed")
+        if raw_elapsed < 0:
+            # 能走到这里说明超前量在容忍阈值内（超阈值的已在上面进了强制名单），
+            # 属正常时钟抖动；elapsed 已被钳到 0，标注出来便于排查他源写入。
+            reasons.append("clock_skew")
         if market_weight > 5:
             reasons.append("high_market")
         if base_w > 1:
@@ -594,14 +668,21 @@ def main():
         print("❌ Supabase 凭据缺失: %s" % e)
         return 1
 
-    # 行情端点自检：未配置就在这里失败，避免白跑一轮才在采集阶段炸
+    # 行情数据源自检：未就绪就在这里失败，避免白跑一轮才在采集阶段炸。
+    # 两种模式的就绪条件不同（模式1 依赖环境变量端点、模式2 直连上游无需任何本地配置），
+    # 故统一走 isQuoteSourceReady —— 修复「模式2 下端点自检必然失败并退出」的问题。
     # （端点值可能含机密，只报「已配置/未配置」，不打印取值）
-    api_base = resolveApiBase()
-    if not isApiBaseUsable(api_base):
-        print("❌ 行情 API 端点未配置或非法：请在仓库 secrets/vars 配置 %s"
-              "（值为完整 http(s) 端点）；当前解析结果不是合法 URL" % ENV_API_BASE)
+    if not isQuoteSourceReady():
+        if currentQuoteMode() == MODE_MOOMOO:
+            print("❌ 行情数据源未就绪（%s）：模式2 依赖同目录 %s.py，"
+                  "请确认该文件已随仓库检出且可导入" % (describeQuoteSource(), MOOMOO_CLIENT_MODULE))
+        else:
+            print("❌ 行情 API 端点未配置或非法：请在仓库 secrets/vars 配置 %s"
+                  "（值为完整 http(s) 端点）；当前解析结果不是合法 URL" % ENV_API_BASE)
         return 1
-    print("行情端点: 已配置（环境变量 %s，值不打印）" % ENV_API_BASE)
+    print("行情数据源: %s（已就绪）" % describeQuoteSource())
+    # 落进执行日志：切换期回溯「某次采集走的是模式1 还是模式2」时不必翻环境变量
+    EXEC_LOG["quote_mode"] = describeQuoteSource()
 
     try:
         usc_list, state_map = load_state(client)

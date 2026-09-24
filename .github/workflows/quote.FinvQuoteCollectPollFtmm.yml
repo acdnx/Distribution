@@ -19,8 +19,22 @@
 #           行身份为主键 usc（2026-09-25 由 secu_code 改为 usc）。
 #   状态表  Supabase PG finv_quote_collect_state_poll_futu —— **回写目标**（视图只读）。
 #           回写键为 usc；dt_update 由表上触发器自动维护。
-#   行情    LAMBDA_FTMM_API_BASE（secrets 注入；必填，未配置直接失败）→ 分钟线 JSON
-#           请求参数 secuCode 取 usc（即原 secu_code 的重命名，与旧版口径一致）
+#           ⚠️ 该表**跨数据源共享**（Futu 侧作业也在写同一张表，表名 _poll_futu 即由此而来），
+#           他源可能写入超前于真实时刻的时间戳（实测见过 dt_last_check 落在未来 ~7 分钟）。
+#           这类脏值会让调度器算出负 elapsed → 负分 → 该品种永久选不中且 72h 强制也不触发
+#           （自锁饥饿）。脚本已内置守卫（CLOCK_SKEW_TOLERANCE）：时间戳超前超过阈值即
+#           视为不可信 → 本轮强制重采并用本次 now 覆盖两个时间指针（自愈），
+#           同时把偏斜品种记入执行日志的 clock_skew 字段，便于事后确认自愈是否生效。
+#   行情    模式1（默认）：LAMBDA_FTMM_API_BASE（secrets 注入；**仅模式1 必填**，未配置直接失败）
+#            → 自建端点代理 moomoo；请求参数 secuCode 取 usc（即原 secu_code 的重命名）
+#           模式2：Python 进程内直连 moomoo 官方 quote-v2-web
+#            （不需要任何端点配置；实现在 .github/Python/MoomooQuoteV2WebRestClient.py）
+#           **模式开关 = 门面文件 .github/Python/FtmmQuoteV2WebRestClient.py 顶部的常量
+#           QUOTE_FETCH_MODE**（纯代码常量，不读环境变量）：默认 MODE_CFP_ENDPOINT(=1)，
+#           切模式2 改为 MODE_MOOMOO(=2) 后提交即可；取值非法时该模块导入即抛错。
+#           两模式**对外契约相同**（成功 → 同结构 JSON / 失败 → None），故作业代码与产物
+#           （MVSV 头部元数据取自视图、数据行取自响应 data.list）完全不受影响；
+#           默认 MODE_CFP_ENDPOINT，即「不改该常量 = 行为与改造前完全一致」
 #   产物    MVSV → Contents API 递交 ACANX/Distribution @ quote :
 #           {DATA_DIR}/{usc}/{usc}_Min_{yyyyMMdd}.mvsv（**一天一个文件，按北京时间日期**；
 #           同一天重复运行覆盖当日文件；DATA_DIR 为脚本内常量）
@@ -31,14 +45,19 @@
 #   SUPABASE_PROJECT_REF / SUPABASE_KEY  Supabase 凭据（读状态视图 / 回写状态表）
 #   GIT_COMMIT_TOKEN                     GitHub 令牌（需 ACANX/Distribution 的
 #                                        contents:write 权限）
-#   LAMBDA_FTMM_API_BASE                 行情 API 端点（**必填**；secrets 优先回落 vars。
-#                                        名字必须与客户端 ENV_API_BASE 一致，否则会解析成
-#                                        占位符 ===LAMBDA_FTMM_API_BASE=== 而请求失败）
+#   LAMBDA_FTMM_API_BASE                 行情 API 端点（**仅模式1 必填**；secrets 优先回落
+#                                        vars。名字必须与客户端 ENV_API_BASE 一致，否则会
+#                                        解析成占位符 ===LAMBDA_FTMM_API_BASE=== 而请求失败）
 #                                        （旧名 API_BASE 仍兼容，但不再作为主用）
 #
 # 可选环境变量（缺省值已写在脚本常量里，一般无需配置）：
 #   POLL_STATE_VIEW  状态读取源（缺省 finv_quote_collect_state_poll_futu_view）
 #   POLL_STATE_TABLE 状态回写目标（缺省 finv_quote_collect_state_poll_futu）
+#
+# ⚠️ 模式2（QUOTE_FETCH_MODE = MODE_MOOMOO）的上游限流风险：2026-09-25 实测同 IP **连发约
+#    7 次**即触发 moomoo 上游限流（HTTP 200 + HTML 限流页），且**持续约 12 分钟**；本作业约
+#    0.6 次/分钟，与触发条件（≈38 次/分钟）差约 60 倍，当前节奏应安全，但**持续速率的安全
+#    配额未测出** —— 调大 POLL_COUNT / 缩短轮询周期前必须先用 dry_run 观察。模式1 不经此路径。
 #
 # 退出码语义（脚本约定）：0 = 成功（含无启用品种 / dry_run）；1 = 致命错误
 # 或任一选中品种采集/递交失败（状态回写与执行日志在任何情况下都先完成再退出）。
@@ -97,6 +116,7 @@ jobs:
           echo "状态视图   : finv_quote_collect_state_poll_futu_view（读取源，主键 usc）"
           echo "视图筛选   : 由视图定义负责（三表 flag_enable=1 且 provider=FTMM）"
           echo "状态表     : finv_quote_collect_state_poll_futu（回写目标，键 usc）"
+          echo "行情模式   : 由门面常量 QUOTE_FETCH_MODE 决定（默认 MODE_CFP_ENDPOINT=1；实际值见下方脚本首行输出）"
 
       - name: 执行轮询采集
         env:
@@ -111,6 +131,9 @@ jobs:
           LAMBDA_FTMM_API_BASE: ${{ secrets.LAMBDA_FTMM_API_BASE || vars.LAMBDA_FTMM_API_BASE }}
           # 兼容旧名：仅当主用未配置时客户端才回落读它
           API_BASE: ${{ secrets.API_BASE || vars.API_BASE }}
+          # 注意：行情获取模式**不是环境变量**，而是门面常量
+          # .github/Python/FtmmQuoteV2WebRestClient.py 的 QUOTE_FETCH_MODE；
+          # 切换模式 = 改那个常量并提交，此处无需（也无法）配置。
           # 演练开关（来自 workflow 输入）
           POLL_DRY_RUN: ${{ inputs.dry_run || 'false' }}
         run: python3 .github/Python/FinvQuoteCollectPollFtmm.py

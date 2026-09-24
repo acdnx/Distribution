@@ -141,3 +141,19 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Python（.github/Python/ 下的采集/工具脚本：避免 __pycache__ 等中间产物入库）
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 采集产物：行情 .mvsv 由工作流提交到远端 quote 分支持久化，
+# 本地手动跑脚本/探针时若落盘到仓库目录内，不应被误提交
+.github/Python/*.mvsv
