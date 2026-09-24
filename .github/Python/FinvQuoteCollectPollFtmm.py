@@ -28,12 +28,12 @@ from SupabaseRestClient import SupabaseRestClient, SupabaseRestError, eqFilter
 GITHUB_OWNER = "ACANX"
 GITHUB_REPO = "Distribution"
 GITHUB_BRANCH = "quote"
-DATA_DIR = "Data/Finv/SecuQuote/V5"          # MVSV 数据文件落点目录
-LOG_DIR = "Data/Finv/SecuQuote/ExecLog"    # 执行日志落点目录
+DATA_DIR = "Data/Finv/SecurityQuoteV5/FTMM/Min"          # MVSV 数据文件落点目录
+LOG_DIR = "Data/Finv/SecurityQuoteV5/ExecLog"    # 执行日志落点目录
 
 # ============ 调度常量 ============
 # 单次运行采集的标的数量。按需求写死在此，后续如需调整直接改这里。
-POLL_COUNT = 1
+POLL_COUNT = 3
 FORCE_FETCH_INTERVAL = 72 * 3600          # 距上次检查超过 72 小时强制采集（秒）
 
 # ============ 环境变量 ============
