@@ -12,9 +12,10 @@
 #           读取 + 回写均经 PostgREST；dt_update 由表上触发器自动维护）
 #   行情    LAMBDA_FTMM_API_BASE（secrets 注入；必填，未配置直接失败）→ 分钟线 JSON
 #   产物    MVSV → Contents API 递交 ACANX/Distribution @ quote :
-#           Data/Finv/SecuQuote/{code}/{code}_Min_{yyyyMMdd_HHmmss}.mvsv
+#           {DATA_DIR}/{code}/{code}_Min_{yyyyMMdd}.mvsv（**一天一个文件，按北京时间日期**；
+#           同一天重复运行覆盖当日文件；DATA_DIR 为脚本内常量）
 #           （目标仓库/分支由脚本内常量锁定，与本仓库 acdnx/Distribution 无关）
-#   日志    同仓库 quote : Data/Finv/SecuQuoteExecLog/{yyyyMMdd_HHmmss}.log
+#   日志    {LOG_DIR}/{yyyyMMdd_HHmmss}.log（一次运行一个文件，保留时分秒）
 #
 # 必需 Secrets / Variables：
 #   SUPABASE_PROJECT_REF / SUPABASE_KEY  Supabase 凭据（读 / 回写状态表）
@@ -29,7 +30,7 @@
 # 或任一选中品种采集/递交失败（状态回写与执行日志在任何情况下都先完成再退出）。
 # ============================================================================
 
-name: quote.FinvQuoteCollectPollFtmm
+name: sche.FinvQuoteCollectPollFtmm
 
 on:
   workflow_dispatch:

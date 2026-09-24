@@ -18,8 +18,8 @@ from ConsoleUtil import ensureConsoleUtf8
 from MvsvQuoteBuilder import buildMvsvContent, buildMvsvFileName, extractSummary
 from FtmmQuoteV2WebRestClient import (ENV_API_BASE, extractMinuteList,
                                       fetchFiveDayMinuteQuote, isApiBaseUsable,
-                                      resolveApiBase)
-from DateTimeUtil import (fmtDisplay, fmtTsSuffix, isUsDst, nowBeijing,
+                                      maskApiUrl, resolveApiBase)
+from DateTimeUtil import (fmtDateSuffix, fmtDisplay, fmtTsSuffix, isUsDst, nowBeijing,
                            parseDt, shiftDays, toEpochSeconds, utcNow)
 from SupabaseRestClient import SupabaseRestClient, SupabaseRestError, eqFilter
 
@@ -110,6 +110,22 @@ def _to_int(value, default=0):
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _scrub(text):
+    """把文本中出现的行情端点替换为打码形态
+
+    异常文案可能夹带完整 URL（如 urllib 的 unknown url type: 'https://...'），
+    而执行日志是要上传到 quote 分支的，一旦落库即持久外泄，故写入前统一擦除端点。
+
+    :param text: 待写入日志/执行日志的文本
+    :return: 端点已打码的文本
+    """
+    try:
+        base = resolveApiBase()
+    except Exception:
+        return text
+    return text.replace(base, maskApiUrl(base)) if isApiBaseUsable(base) else text
 
 
 def load_state(client):
@@ -353,7 +369,8 @@ def collect_single(code):
     """采集单个品种：行情 API → MVSV 落盘；成功返回摘要 dict，失败返回 None"""
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     now = nowBeijing()
-    ts_suffix = fmtTsSuffix(now)
+    # 文件按「一天一个」命名（000985_Min_20260820.mvsv），同一天的重复运行覆盖当日文件
+    date_suffix = fmtDateSuffix(now)
     fetch_time = fmtDisplay(now)
     print("[采集] 开始处理品种: %s，北京时间 %s" % (code, fetch_time))
     raw = fetchFiveDayMinuteQuote(code)
@@ -367,7 +384,7 @@ def collect_single(code):
     latest_ts = max(item.get("ts", 0) for item in minute_list) if minute_list else 0
     summary = extractSummary(data_node)
     content = buildMvsvContent(code, minute_list, summary, fetch_time)
-    file_name = buildMvsvFileName(code, ts_suffix)
+    file_name = buildMvsvFileName(code, date_suffix)
     file_path = TEMP_DIR / file_name
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -548,12 +565,13 @@ def main():
         try:
             outcome = poll_one(client, sel, state_map, now, DRY_RUN)
         except Exception as e:
+            err = _scrub("%s" % e)
             outcome = {"code": sel["code"], "reason": sel["reason"],
                        "reason_detail": sel["reason_detail"],
                        "poll_success": False, "upload_success": None,
-                       "record_count": 0, "error": "处理异常: %s" % e}
-            EXEC_LOG["errors"].append("%s: %s" % (sel["code"], e))
-            print("❌ [轮询] %s 处理异常: %s" % (sel["code"], e))
+                       "record_count": 0, "error": "处理异常: %s" % err}
+            EXEC_LOG["errors"].append("%s: %s" % (sel["code"], err))
+            print("❌ [轮询] %s 处理异常: %s" % (sel["code"], err))
         EXEC_LOG["results"].append(outcome)
         if (not outcome.get("poll_success")) or outcome.get("upload_success") is False:
             any_fail = True

@@ -62,7 +62,9 @@ FtmmQuoteV2WebRestClient —— FTMM 行情 V2 Web REST 接口客户端（纯标
 ----------------------------------------------------------------------------------------
     - 请求参数固定为 ?secuCode={code}（与旧版一致；代码做 URL 编码，支持非 ASCII 代码）；
     - 单次请求默认 30 秒超时；
-    - 日志会打印完整请求 URL：端点若以 GitHub secret 注入，平台会自动遮蔽该值；
+    - **日志不打印明文端点**：请求 URL 一律经 maskApiUrl 打码（域名只留前 2 字符、
+      路径只留末段资源名、保留 scheme 与查询串），避免端点经日志外泄；
+      不依赖 Actions 的 secret 自动遮蔽（配成 var 或本地运行时就不会被遮蔽）；
     - 端点只填端点本身，不要带查询串。
 
 【环境要求】Python 3.8+，仅标准库；可直连行情 API 端点。
@@ -83,6 +85,10 @@ ENV_API_BASE_FALLBACK = "API_BASE"
 DEFAULT_API_BASE = "===%s===" % ENV_API_BASE
 # 合法端点协议前缀
 URL_SCHEMES = ("http://", "https://")
+# 日志打码：域名保留的前缀字符数（给个环境提示，不足以还原域名）
+HOST_KEEP = 2
+# 日志打码：路径末尾保留的段数（资源名，便于确认调用的接口）
+PATH_TAIL_KEEP = 1
 # 单次请求默认超时（秒）
 DEFAULT_TIMEOUT = 30
 # 请求头 User-Agent
@@ -120,6 +126,44 @@ def isApiBaseUsable(base):
     return isinstance(base, str) and base.startswith(URL_SCHEMES)
 
 
+def maskApiUrl(url):
+    """把请求 URL 打码后用于日志输出（端点属运行机密，禁止明文入日志）
+
+    打码规则（只保留诊断必需的最小信息）：
+        - 保留 scheme（http/https）与查询串（? 之后，只含证券代码等无机密参数）；
+        - **域名**只保留前 HOST_KEEP 个字符，其余（含完整域名与端口）打码；
+        - **路径前缀**逐段打码，只保留末尾 PATH_TAIL_KEEP 段（资源名，便于确认调用的是哪个接口）。
+
+    示例：
+        https://minquote.103456.xyz/API/Futu/Quote/Minute?secuCode=517400
+          → https://mi***/***/***/***/Minute?secuCode=517400
+
+    :param url: 完整请求 URL（也可以是端点 base）
+    :return: 打码后的字符串
+    """
+    if not isinstance(url, str) or not url:
+        return "***"
+    if "://" in url:
+        scheme, rest = url.split("://", 1)
+        prefix = scheme + "://"
+    else:
+        prefix, rest = "", url
+    # 查询串原样保留；只处理 ? 之前的部分
+    path, sep, query = rest.partition("?")
+    host, slash, tail = path.partition("/")
+    masked_host = (host[:HOST_KEEP] + "***") if host else "***"
+    if not slash:
+        masked_path = ""
+    else:
+        segments = [s for s in tail.split("/") if s]
+        if not segments:
+            masked_path = "/***"
+        else:
+            keep = segments[-PATH_TAIL_KEEP:] if PATH_TAIL_KEEP > 0 else []
+            masked_path = "/" + "/".join(["***"] * (len(segments) - len(keep)) + keep)
+    return "%s%s%s%s%s" % (prefix, masked_host, masked_path, sep, query)
+
+
 def fetchFiveDayMinuteQuote(secu_code, base_url=None, timeout=DEFAULT_TIMEOUT):
     """拉取单个证券的分钟线行情（FiveDayMinute 窗口；GET ?secuCode={code}）
 
@@ -133,13 +177,15 @@ def fetchFiveDayMinuteQuote(secu_code, base_url=None, timeout=DEFAULT_TIMEOUT):
     if not isApiBaseUsable(base):
         # 端点未配置（占位符）或形态非法：明确报错并走失败契约，
         # 不让 urllib 抛 "unknown url type" 这类无信息量的异常
+        # 占位符可直接展示（它就是「未配置」的标记）；真实端点值一律打码后再打印
+        shown = base if base == DEFAULT_API_BASE else maskApiUrl(base)
         print("[行情] 端点未配置或非法（解析值: %s）；请在仓库 secrets/vars 配置环境变量 %s，"
               "值为完整 http(s) 端点（如 https://host/API/Futu/Quote/Minute）"
-              % (base, ENV_API_BASE))
+              % (shown, ENV_API_BASE))
         return None
     url = "%s?%s=%s" % (base, PARAM_SECU_CODE,
                         urllib.parse.quote(str(secu_code), safe=""))
-    print("[行情] 请求数据: %s" % url)
+    print("[行情] 请求数据: %s" % maskApiUrl(url))
     status, text, err = sendRequest("GET", url, headers={"User-Agent": USER_AGENT},
                                     timeout=timeout)
     if err:

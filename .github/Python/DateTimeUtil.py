@@ -31,7 +31,8 @@ DateTimeUtil —— 日期时间 / 时间戳 / 字符串转换工具库（纯标
     nowBeijing()            当前北京时间（tz-aware）
     toBeijing(dt)           任意 tz-aware 时间 → 北京时间
     parseDt(value, default=None)   宽松解析 ISO 字符串（naive 按北京时间补齐）
-    fmtTsSuffix(dt=None)  → "20260924_223000"（文件名后缀）
+    fmtTsSuffix(dt=None)  → "20260924_223000"（文件名后缀，含时分秒；一次运行一个文件）
+    fmtDateSuffix(dt=None) → "20260924"（文件名后缀，仅日期；一天一个文件，如行情 MVSV）
     fmtDisplay(dt=None)    → "2026-09-24 22:30:00"（展示与日志）
     toEpochSeconds(dt=None) → int 秒级时间戳
     shiftDays(dt, days)    dt 平移指定天数（正数为未来）
@@ -39,10 +40,11 @@ DateTimeUtil —— 日期时间 / 时间戳 / 字符串转换工具库（纯标
 
 四、使用示例
 ----------------------------------------------------------------------------------------
-    from DateTimeUtil import nowBeijing, fmtTsSuffix, fmtDisplay, parseDt
+    from DateTimeUtil import nowBeijing, fmtDateSuffix, fmtTsSuffix, fmtDisplay, parseDt
 
     now = nowBeijing()                                  # 调度与命名的统一时间基准
-    file_name = "%s_Min_%s.mvsv" % (code, fmtTsSuffix(now))
+    file_name = "%s_Min_%s.mvsv" % (code, fmtDateSuffix(now))   # 一天一个文件
+    log_name = "%s.log" % fmtTsSuffix(now)                      # 一次运行一个文件
     last = parseDt(row.get("dt_last_check"))       # 解析失败返回 None
     if last is None:
         ...
@@ -58,8 +60,10 @@ from datetime import datetime, timedelta, timezone
 BEIJING_TZ = timezone(timedelta(hours=8))
 # UTC 时区
 UTC_TZ = timezone.utc
-# 文件名时间戳后缀格式（北京时间的 ts_suffix）
+# 文件名时间戳后缀格式（北京时间的 ts_suffix，含时分秒，用于「一次运行一个文件」的场景，如执行日志）
 FORMAT_TS_SUFFIX = "%Y%m%d_%H%M%S"
+# 文件名日期后缀格式（北京时间，仅日期，用于「一天一个文件」的场景，如行情 MVSV）
+FORMAT_DATE_SUFFIX = "%Y%m%d"
 # 展示 / 日志用的可读格式
 FORMAT_DISPLAY = "%Y-%m-%d %H:%M:%S"
 
@@ -122,6 +126,15 @@ def fmtTsSuffix(dt=None):
 def fmtDisplay(dt=None):
     """格式化为可读时间：2026-09-24 22:30:00（默认取当前北京时间）"""
     return (toBeijing(dt) if dt is not None else nowBeijing()).strftime(FORMAT_DISPLAY)
+
+
+def fmtDateSuffix(dt=None):
+    """格式化为文件名日期后缀：20260924（默认取当前北京时间；一天一个文件的场景）
+
+    :param dt: 任意 tz-aware 时间；None 表示取当前北京时间
+    :return: 形如 "20260924" 的日期字符串（北京时间口径）
+    """
+    return (toBeijing(dt) if dt is not None else nowBeijing()).strftime(FORMAT_DATE_SUFFIX)
 
 
 def toEpochSeconds(dt=None):

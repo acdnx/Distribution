@@ -30,8 +30,10 @@ MvsvQuoteBuilder —— 分钟级行情 MVSV 文件生成契约库（纯标准�
 3. 数据供应商固定为 FT。
 4. 可选汇总行（# 备注 / 英文块无对应行）：由 extractSummary 从行情 API 的
    data 节点提取 c/h/l/o/cnt 五个键，缺失键自动跳过。
-5. 文件命名：{code}_{period}_{ts_suffix}.mvsv（period 默认 Min；
-   ts_suffix 形如 20260924_223000，由调用方按北京时间生成）。
+5. 文件命名：{code}_{period}_{date_suffix}.mvsv（period 默认 Min；
+   date_suffix 形如 20260820，**仅日期、北京时间口径，一天一个文件**。
+   同一品种同一天的重复采集会命中同一路径（递交时覆盖当日文件），
+   后缀由调用方用 DateTimeUtil.fmtDateSuffix 生成）。
 
 三、使用示例（同目录脚本）
 ----------------------------------------------------------------------------------------
@@ -39,7 +41,7 @@ MvsvQuoteBuilder —— 分钟级行情 MVSV 文件生成契约库（纯标准�
 
     summary = extractSummary(raw["data"])                       # {c,h,l,o,cnt}
     content = buildMvsvContent(code, minute_list, summary, fetch_time)
-    file_name = buildMvsvFileName(code, "20260924_223000")    # HSI_Min_20260924_223000.mvsv
+    file_name = buildMvsvFileName(code, "20260820")           # 000985_Min_20260820.mvsv
 
 【环境要求】Python 3.8+，仅标准库。
 """
@@ -68,15 +70,16 @@ def extractSummary(data_node):
     return {k: data_node.get(k) for k in SUMMARY_KEYS}
 
 
-def buildMvsvFileName(secu_code, ts_suffix, period="Min"):
-    """生成 MVSV 文件名：{code}_{period}_{ts_suffix}.mvsv
+def buildMvsvFileName(secu_code, date_suffix, period="Min"):
+    """生成 MVSV 文件名：{code}_{period}_{date_suffix}.mvsv
 
-    :param secu_code: 证券代码（如 HSI）
-    :param ts_suffix: 时间戳后缀（形如 20260924_223000，调用方按北京时间生成）
+    :param secu_code: 证券代码（如 000985）
+    :param date_suffix: 日期后缀（形如 20260820，调用方用 DateTimeUtil.fmtDateSuffix
+                        按北京时间生成；**仅日期**，故一天一个文件）
     :param period: 数据周期标识，默认 Min（分钟级）
-    :return: 文件名字符串（不含目录），如 HSI_Min_20260924_223000.mvsv
+    :return: 文件名字符串（不含目录），如 000985_Min_20260820.mvsv
     """
-    return "%s_%s_%s.mvsv" % (secu_code, period, ts_suffix)
+    return "%s_%s_%s.mvsv" % (secu_code, period, date_suffix)
 
 
 def buildMvsvContent(secu_code, minute_list, data_summary, fetch_time):
