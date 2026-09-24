@@ -27,7 +27,7 @@
 # 或任一选中品种采集/递交失败（状态回写与执行日志在任何情况下都先完成再退出）。
 # ============================================================================
 
-name: quote.FinvQuoteCollectPollFtmm
+name: sche.FinvQuoteCollectPollFtmm
 
 on:
   workflow_dispatch:
