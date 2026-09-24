@@ -88,7 +88,7 @@ jobs:
           # ACANX/Distribution@quote；dry_run 模式可不配）
           GIT_COMMIT_TOKEN: ${{ secrets.GIT_COMMIT_TOKEN }}
           # 选填：行情 API 端点（secrets 优先，回落 vars，均未配置用脚本默认值）
-          API_BASE: ${{ secrets.API_BASE || vars.API_BASE }}
+          API_BASE: ${{ secrets.API_BASE || vars.LAMBDA_FTMM_API_BASE }}
           # 演练开关（来自 workflow 输入）
           POLL_DRY_RUN: ${{ inputs.dry_run || 'false' }}
         run: python3 .github/Python/FinvQuoteCollectPollFtmm.py
