@@ -150,7 +150,7 @@ SUPPORTED_MODES = (MODE_CFP_ENDPOINT, MODE_MOOMOO)
 # ★★ 当前生效的行情获取模式：**取值只能是 MODE_CFP_ENDPOINT 或 MODE_MOOMOO**。
 #     切换 = 改这一行 + 提交（本文件是唯一的模式归口，**不读任何环境变量/配置文件**）。
 #     默认 MODE_CFP_ENDPOINT，即「不动这一行 ⇒ 行为与模式改造前完全一致」。
-QUOTE_FETCH_MODE = MODE_CFP_ENDPOINT
+QUOTE_FETCH_MODE = MODE_MOOMOO
 
 # 模式2 的实现模块名（同目录，惰性 import）
 MOOMOO_CLIENT_MODULE = "MoomooQuoteV2WebRestClient"
