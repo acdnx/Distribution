@@ -53,6 +53,16 @@ FORCE_FETCH_INTERVAL = 72 * 3600          # 距上次检查超过 72 小时强�
 # 让异常尽快自愈；正常 NTP 抖动远小于此，不会误触发。
 CLOCK_SKEW_TOLERANCE = 60
 
+# ============ remark 回写（表上 2026-09-25 新增列，标记最后采集成功/失败） ============
+# 状态表 finv_quote_collect_state_poll_futu 的 remark 列（文本，可空）：每次回写顺带更新为
+# 「结果|yyyyMMddHHmmss」（北京时间，取自本次运行的 now，与 dt_last_check 同一时刻）。
+#   · 采集成功（拿到行情，无论有无新数据）→ "采集成功|20260925214155"
+#   · 采集失败                            → "采集失败|20260925214155"
+# 即 remark 恒记录**最后一次采集**的结果与时刻；dry_run 分支不回写（与状态回写同口径）。
+REMARK_SUCCESS = "采集成功"
+REMARK_FAIL = "采集失败"
+REMARK_SEP = "|"
+
 # ============ 环境变量 ============
 # Supabase 凭据由 SupabaseRestClient 从环境变量读取（不在此处留存副本）
 GIT_COMMIT_TOKEN = os.environ.get("GIT_COMMIT_TOKEN", "").strip()
@@ -254,6 +264,8 @@ def patch_state_row(client, usc, state):
 
     过滤键为 STATE_KEY（usc，表主键）。时间列为空（从未采集/从未取到新数据）时
     不出现在载荷里，保持 NULL 原状；计数列强制夹非负，满足表上的 chk_*_nonnegative 约束。
+    2026-09-25 起 payload 另含 remark（表新增列）："结果|yyyyMMddHHmmss"（北京时间），
+    标记最后一次采集成功/失败；state 未给 remark（异常路径中断）时保持原值不覆盖。
     """
     payload = {}
     if state.get("time_last_check"):
@@ -264,6 +276,9 @@ def patch_state_row(client, usc, state):
     payload["count_last_fetch"] = max(0, _to_int(state.get("count_last_fetch")))
     payload["count_fail"] = max(0, _to_int(state.get("count_fail")))
     payload["count_stale"] = max(0, _to_int(state.get("count_stale")))
+    remark = str(state.get("remark") or "").strip()
+    if remark:
+        payload["remark"] = remark
 
     filters = eqFilter(STATE_KEY, usc)
     text = client.patch(STATE_TABLE, filters, payload)
@@ -585,18 +600,34 @@ def upload_to_repo(content, path_key, commit_msg):
 
 
 # ============ 单品种轮询（采集 → 状态机流转 → 回写） ============
+def build_remark(now, success):
+    """构造 remark 文本："结果|yyyyMMddHHmmss"（北京时间）
+
+    时刻取自本次运行的 now（与 dt_last_check 的写入值同源，保证两者一致）；
+    结果段为 REMARK_SUCCESS（采集成功，含「成功但无新数据」）或 REMARK_FAIL（采集失败）。
+
+    :param now: 本次运行时刻（tz-aware，nowBeijing 口径）
+    :param success: 本次采集是否成功
+    :return: remark 文本，如 "采集成功|20260925214155"
+    """
+    return "%s%s%s%s" % (REMARK_SUCCESS if success else REMARK_FAIL, REMARK_SEP,
+                         fmtDateSuffix(now), fmtTimeSuffix(now))
+
+
 def poll_one(client, sel, state_map, now, dry_run):
     """处理一个选中品种：状态机流转与旧版 handle_poll 完全一致
 
     有新数据 → 重置 fail/stale、推进 fetch 指针；无新数据 → stale+1、fail 清零；
-    采集失败 → fail+1。任何分支 dt_last_check 都推进到本次运行时刻。
+    采集失败 → fail+1。任何分支 dt_last_check 都推进到本次运行时刻；
+    2026-09-25 起同时把 remark 更新为「采集成功/采集失败|yyyyMMddHHmmss」（北京时间），
+    标记最后一次采集结果与时刻（dry_run 分支不回写，与状态字段同口径）。
     回写走表（STATE_TABLE），过滤键为 usc。
     """
     usc = sel["usc"]
     state = state_map.setdefault(usc, {
         "time_last_check": "", "time_last_fetch": "",
         "ts_latest_data": 0, "count_last_fetch": 0,
-        "count_fail": 0, "count_stale": 0,
+        "count_fail": 0, "count_stale": 0, "remark": "",
     })
     state["time_last_check"] = now.isoformat()
 
@@ -609,6 +640,7 @@ def poll_one(client, sel, state_map, now, dry_run):
     outcome["poll_success"] = result is not None
 
     if result:
+        state["remark"] = build_remark(now, True)
         outcome["record_count"] = result["record_count"]
         new_ts = result["ts_latest_data"]
         old_ts = _to_int(state.get("ts_latest_data"))
@@ -637,6 +669,7 @@ def poll_one(client, sel, state_map, now, dry_run):
                 EXEC_LOG["errors"].append("%s 递交失败: %s" % (usc, up.get("message")))
     else:
         state["count_fail"] = _to_int(state.get("count_fail")) + 1
+        state["remark"] = build_remark(now, False)
         outcome["error"] = "行情采集失败"
         print("[状态] %s 采集失败，count_fail=%d" % (usc, state["count_fail"]))
 
