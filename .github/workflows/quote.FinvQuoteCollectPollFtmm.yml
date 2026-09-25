@@ -97,6 +97,12 @@ jobs:
 
     env:
       PYTHONIOENCODING: utf-8
+      # CI 里 stdout 是**块缓冲**（管道、非 TTY），而 GitHubCommitContent 的诊断信息走
+      # stderr、立即输出 ⇒ 两个流的**行序会错乱**。实测症状：GCMain 的
+      # 「[GitHubCommitContent] 提交目标解析 … 路径 = …/GCMain/…」被显示在 USDCNY 的上传
+      # 日志中间，看着像"路径串了"，其实提交路径完全正确，纯粹是缓冲造成的显示顺序。
+      # 关掉缓冲后行序与真实执行序一致；附带好处：进程异常退出时已打印内容不会被丢掉。
+      PYTHONUNBUFFERED: "1"
 
     steps:
       # 开发阶段手动触发：检出分支默认 sche（脚本与工作流所在分支）
