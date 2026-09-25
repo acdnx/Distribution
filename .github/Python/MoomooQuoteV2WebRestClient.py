@@ -127,8 +127,9 @@ moomoo（富途）官方 quote-v2-web 接口**拉取证券分钟行情（5 日�
       subInstrumentType **无条件**写入查询串（即使为空），只有 req_section 是条件写入
       （omitempty）。本文件保持同一口径，不额外做「空值即省略」的优化。
     - **单次请求超时 15 秒**、**远程配置 5 秒**（均与 Go 一致）。
-    - 日志**不打印** quote-token / cookie / csrf（属凭据）；请求 URL 本身是公开上游端点，
-      照常打印以便排查。
+    - 日志**不打印** quote-token / cookie / csrf（属凭据）；上游请求 URL 自 2026-09-25 起
+      **打码后打印**（maskUpstreamUrl：主机与路径前缀不落明文，保留资源名与查询串）；
+      远程配置端点 cfgdistnet.pages.dev 为公开静态配置服务，URL 照常打印以便排查。
 
 【环境要求】Python 3.8+，仅标准库；运行环境需可直连 www.moomoo.com。
 """
@@ -156,6 +157,13 @@ REMOTE_CONFIG_BASE_URLS = ("https://cfgdistnet.pages.dev/Quote/Futu",)
 DEFAULT_TIMEOUT = 15
 # 远程配置请求超时（秒，与 Go 的 RemoteConfigTimeout 一致）
 REMOTE_CONFIG_TIMEOUT = 5
+
+# ============ 日志打码（2026-09-25 起：上游 URL 不落明文） ============
+# 用户要求把日志中的 www.moomoo.com/quote-api/quote-v2 部分打码。口径与模式1 的
+# maskApiUrl 一致（主机保留前 2 字符、路径只保留末段资源名、保留 scheme 与查询串）；
+# 因「两模式零依赖」约束（本文件不得 import FtmmQuoteV2WebRestClient），在此独立实现。
+URL_MASK_HOST_KEEP = 2        # 主机名保留的前缀字符数（www.moomoo.com → ww***）
+URL_MASK_PATH_TAIL_KEEP = 1   # 路径保留的末段数（…/quote-v2/get-quote-minute → /***/***/get-quote-minute）
 # 签名密钥（与 Go 的 "quote_web" 一致）
 SIGN_KEY = "quote_web"
 # 签名中间值截取长度（Go: hmac 结果取前 10 → sha256 结果取前 10）
@@ -452,6 +460,40 @@ def buildRequestUrl(params):
         pairs.append((PARAM_REQ_SECTION, params[PARAM_REQ_SECTION]))
     pairs.append((PARAM_TIMESTAMP, params.get(PARAM_TIMESTAMP, "")))
     return "%s?%s" % (MOOMOO_API_BASE, urllib.parse.urlencode(pairs))
+
+
+def maskUpstreamUrl(url):
+    """把上游请求 URL 打码后用于日志输出（主机名与路径前缀不落明文）
+
+    打码规则（与模式1 的 maskApiUrl 同口径，见 URL_MASK_HOST_KEEP 注释）：
+        - 保留 scheme（http/https）与查询串（? 之后，只含证券参数等无机密内容）；
+        - **主机名**只保留前 URL_MASK_HOST_KEEP 个字符（www.moomoo.com → ww***）；
+        - **路径**只保留末尾 URL_MASK_PATH_TAIL_KEEP 段（资源名，便于确认调用的接口）。
+
+    示例：https://www.moomoo.com/quote-api/quote-v2/get-quote-minute?stockId=1&_t=2
+          → https://ww***/***/***/get-quote-minute?stockId=1&_t=2
+
+    :param url: 完整请求 URL
+    :return: 打码后的字符串；非法输入返回 "***"
+    """
+    if not isinstance(url, str) or not url:
+        return "***"
+    if "://" not in url:
+        return "***"
+    scheme, rest = url.split("://", 1)
+    path, sep, query = rest.partition("?")
+    host, slash, tail = path.partition("/")
+    masked_host = (host[:URL_MASK_HOST_KEEP] + "***") if host else "***"
+    if not slash:
+        masked_path = ""
+    else:
+        segments = [s for s in tail.split("/") if s]
+        if not segments:
+            masked_path = "/***"
+        else:
+            keep = segments[-URL_MASK_PATH_TAIL_KEEP:] if URL_MASK_PATH_TAIL_KEEP > 0 else []
+            masked_path = "/" + "/".join(["***"] * (len(segments) - len(keep)) + keep)
+    return "%s://%s%s%s%s" % (scheme, masked_host, masked_path, sep, query)
 
 
 def _is_timeout_error(error_text):
@@ -792,7 +834,8 @@ def fetchFiveDayMinuteQuote(secu_code, timeout=DEFAULT_TIMEOUT, view_params=None
         return None
     params[PARAM_TIMESTAMP] = str(int(time.time() * 1000))
     url = buildRequestUrl(params)
-    print("[模式2] 请求上游: %s" % url)
+    # 2026-09-25 起 URL 打码后入日志（主机与路径前缀不落明文，见 maskUpstreamUrl）
+    print("[模式2] 请求上游: %s" % maskUpstreamUrl(url))
 
     status, text, err = sendRequest("GET", url, headers=_build_headers(params), timeout=timeout)
     if err:
