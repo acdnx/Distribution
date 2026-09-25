@@ -25,8 +25,8 @@ from FtmmQuoteV2WebRestClient import (ENV_API_BASE, MODE_MOOMOO, MOOMOO_CLIENT_M
                                       extractMinuteList, fetchFiveDayMinuteQuote,
                                       isApiBaseUsable, isQuoteSourceReady, maskApiUrl,
                                       resolveApiBase)
-from DateTimeUtil import (fmtDateSuffix, fmtDisplay, fmtTsSuffix, isUsDst, nowBeijing,
-                           parseDt, shiftDays, toEpochSeconds, utcNow)
+from DateTimeUtil import (fmtDateSuffix, fmtDisplay, fmtTimeSuffix, fmtTsSuffix, isUsDst,
+                          nowBeijing, parseDt, shiftDays, toEpochSeconds, utcNow)
 from SupabaseRestClient import SupabaseRestClient, SupabaseRestError, eqFilter
 
 # ============ 数据落点常量（按需求锁定：ACANX/Distribution @ quote）============
@@ -498,8 +498,11 @@ def collect_single(usc, meta):
     """
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     now = nowBeijing()
-    # 文件按「一天一个」命名（000985_Min_20260820.mvsv），同一天的重复运行覆盖当日文件
+    # 文件按「一次采集一个文件」命名（000985_Min_20260820_093015.mvsv）：文件名即采集时刻，
+    # 同一天的重复采集不再覆盖（2026-09-25 由「一天一个文件」改来，契约见 MvsvQuoteBuilder.py）。
+    # 日期与时分秒**必须取自同一个 now**，否则跨零点时两段会不属于同一时刻。
     date_suffix = fmtDateSuffix(now)
+    time_suffix = fmtTimeSuffix(now)
     fetch_time = fmtDisplay(now)
     print("[采集] 开始处理品种: %s（名称: %s），北京时间 %s"
           % (usc, meta.get("name") or "无名称", fetch_time))
@@ -518,7 +521,7 @@ def collect_single(usc, meta):
                                timezone=meta.get("timezone"),
                                symbol=meta.get("symbol"), usc=usc,
                                name=meta.get("name"))
-    file_name = buildMvsvFileName(usc, date_suffix)
+    file_name = buildMvsvFileName(usc, date_suffix, time_suffix=time_suffix)
     file_path = TEMP_DIR / file_name
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(content)

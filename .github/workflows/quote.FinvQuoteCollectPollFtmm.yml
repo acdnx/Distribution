@@ -36,8 +36,11 @@
 #           （MVSV 头部元数据取自视图、数据行取自响应 data.list）完全不受影响；
 #           默认 MODE_CFP_ENDPOINT，即「不改该常量 = 行为与改造前完全一致」
 #   产物    MVSV → Contents API 递交 ACANX/Distribution @ quote :
-#           {DATA_DIR}/{usc}/{usc}_Min_{yyyyMMdd}.mvsv（**一天一个文件，按北京时间日期**；
-#           同一天重复运行覆盖当日文件；DATA_DIR 为脚本内常量）
+#           {DATA_DIR}/{usc}/{usc}_Min_{yyyyMMdd}_{HHmmss}.mvsv
+#           （**一次采集一个文件**：日期与时分秒均为北京时间口径、取自同一时刻；
+#            同一天的重复采集**不再覆盖**，各落一个新文件 → 落点目录按采集次数累积；
+#            命名契约见 .github/Python/MvsvQuoteBuilder.py 的「契约变更记录」；
+#            DATA_DIR 为脚本内常量）
 #           （目标仓库/分支由脚本内常量锁定，与本仓库 acdnx/Distribution 无关）
 #   日志    {LOG_DIR}/{yyyyMMdd_HHmmss}.log（一次运行一个文件，保留时分秒）
 #
@@ -113,6 +116,7 @@ jobs:
           echo "DRY_RUN    : ${{ inputs.dry_run || 'false' }}"
           echo "数据落点   : ACANX/Distribution @ quote（脚本内常量锁定）"
           echo "单次采集数 : POLL_COUNT（脚本内常量定义）"
+          echo "产物命名   : {usc}_Min_{yyyyMMdd}_{HHmmss}.mvsv（一次采集一个文件，北京时间）"
           echo "状态视图   : finv_quote_collect_state_poll_futu_view（读取源，主键 usc）"
           echo "视图筛选   : 由视图定义负责（三表 flag_enable=1 且 provider=FTMM）"
           echo "状态表     : finv_quote_collect_state_poll_futu（回写目标，键 usc）"

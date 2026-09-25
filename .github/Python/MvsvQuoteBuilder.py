@@ -49,6 +49,17 @@ MvsvQuoteBuilder —— MVSV 行情数据文件生成契约库（V5 格式）
       头部行结构对换行敏感，故本库在写头部时**统一把名称压成单行**（换行 → 空格、
       去两端空白），任何调用方传入的名称都不会破坏「头部 16 行」的契约。
       名称为空（视图未给）时该行仍为空，行为与旧版一致。
+    - 2026-09-25：**文件命名由「一天一个文件」改为「一次采集一个文件」**（用户要求）：
+      `{code}_{period}_{yyyyMMdd}.mvsv` → **`{code}_{period}_{yyyyMMdd}_{HHmmss}.mvsv`**，
+      即在日期后追加 `_HHmmss`（北京时间时分秒）。随之而来的语义变化：
+        · 同一品种同一天的重复采集**不再覆盖**当日文件，而是各自落一个新文件
+          （落点目录会按采集次数累积），文件名即采集时刻；
+        · 日期与时分秒**必须取自同一时刻**，否则跨零点时会产出「日期与时分秒
+          不属于同一次采集」的错名（调用方传同一个 now 给两个 fmt*Suffix 即可）；
+        · `buildMvsvFileName` 的 `time_suffix` 为**必填**（keyword-only，无缺省）：
+          漏传会立刻 TypeError，而不是静默退回「只有日期」的旧名字。
+      ⚠️ 本次只改**文件命名**；头部 16 行内容契约不变，故上述 V5 样例
+      （`000985_Min_20260820.mvsv`，仍是「只有日期」的老名字）依旧是头部逐字节基准。
 
 形态说明：
     - 纯函数库，没有命令行入口；import 无副作用、不触网；
@@ -108,9 +119,12 @@ MvsvQuoteBuilder —— MVSV 行情数据文件生成契约库（V5 格式）
     数值一律**原样透传**，不做四舍五入 / 补零 / 格式化。
     o 与 lc 恒等（开盘价即上一分钟收盘价），故分钟缺口后的首行两列同时为空。
 
-5. 文件命名：{code}_{period}_{date_suffix}.mvsv（period 默认 Min；
-   date_suffix 形如 20260820，**仅日期、北京时间口径，一天一个文件**；
-   同一品种同一天重复采集覆盖当日文件。后缀由 DateTimeUtil.fmtDateSuffix 生成）。
+5. 文件命名：{code}_{period}_{yyyyMMdd}_{HHmmss}.mvsv（period 默认 Min；
+   yyyyMMdd 与 HHmmss **均为北京时间口径**，由 DateTimeUtil.fmtDateSuffix /
+   fmtTimeSuffix 从**同一个 now** 生成，避免跨零点时两段不属于同一时刻；
+   如 000985_Min_20260820_093015.mvsv）。
+   **一次采集一个文件**：文件名即采集时刻，同一品种同一天重复采集不再覆盖，
+   而是各落一个新文件（2026-09-25 用户要求，改自原「一天一个文件」口径）。
 
 三、市场元数据（Symbol / Region / Market / TimeZone / Currency）
 ----------------------------------------------------------------------------------------
@@ -156,7 +170,9 @@ TimeZone（IANA 标识，如 Asia/Shanghai）：**优先用调用方显式传入
 
     # 二号路径：无视图元数据时按 Config.json 口径解析（兼容旧调用）
     content = buildMvsvContent("000985", minute_list, market="A")
-    file_name = buildMvsvFileName("000985", "20260820")       # 000985_Min_20260820.mvsv
+    # 文件命名：time_suffix 必填；date_suffix / time_suffix 取自同一个 now
+    file_name = buildMvsvFileName("000985", "20260820", time_suffix="093015")
+    #                              → 000985_Min_20260820_093015.mvsv
 
 【环境要求】Python 3.8+，仅标准库（时区换算复用同目录 DateTimeUtil）。
 """
@@ -330,16 +346,29 @@ def resolveMarketMeta(secu_code, market=None, region="", symbol="", usc=""):
     return _compose_market_meta(m, r, sym)
 
 
-def buildMvsvFileName(secu_code, date_suffix, period="Min"):
-    """生成 MVSV 文件名：{code}_{period}_{date_suffix}.mvsv
+def buildMvsvFileName(secu_code, date_suffix, period="Min", *, time_suffix):
+    """生成 MVSV 文件名：{code}_{period}_{yyyyMMdd}_{HHmmss}.mvsv
+
+    2026-09-25 起日期后追加 `_HHmmss`（用户要求）：文件名即采集时刻，**一次采集一个文件**，
+    同一品种同一天的重复采集不再覆盖（原「一天一个文件」口径已废，见模块文档「契约变更记录」）。
 
     :param secu_code: 证券代码（如 000985）
     :param date_suffix: 日期后缀（形如 20260820，调用方用 DateTimeUtil.fmtDateSuffix
-                        按北京时间生成；**仅日期**，故一天一个文件）
+                        按北京时间生成）
     :param period: 数据周期标识，默认 Min（分钟级）
-    :return: 文件名字符串（不含目录），如 000985_Min_20260820.mvsv
+    :param time_suffix: 时间后缀（形如 093015，北京时间时分秒，调用方用
+                        DateTimeUtil.fmtTimeSuffix 生成）——**必填**
+    :return: 文件名字符串（不含目录），如 000985_Min_20260820_093015.mvsv
+
+    ⚠️ 两个后缀必须**取自同一时刻**（把同一个 now 传给两个 fmt*Suffix），否则跨零点时会
+      产出「日期与时分秒不属于同一次采集」的错名。
+
+    ⚠️ `time_suffix` 刻意做成 **keyword-only 且无缺省值**：
+      · 无缺省 → 漏传立刻 TypeError，不会静默退回「只有日期」的旧名字（那正是本次要消灭的形态）；
+      · keyword-only → 老调用若按位置传第三个参数（历史上是 period），会因「缺 time_suffix」
+        直接报错，而不会被当成 time_suffix 拼进文件名里。
     """
-    return "%s_%s_%s.mvsv" % (secu_code, period, date_suffix)
+    return "%s_%s_%s_%s.mvsv" % (secu_code, period, date_suffix, time_suffix)
 
 
 def _fmt(value):
