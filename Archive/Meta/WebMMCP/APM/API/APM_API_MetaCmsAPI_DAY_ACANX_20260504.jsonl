@@ -1,0 +1,10 @@
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Page","status_code":500,"response_time_ms":231,"ts":1777903109391,"session":"cd2391d8-b2a7-4715-9c89-ee47bd829488","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Page","status_code":500,"response_time_ms":80,"ts":1777903118068,"session":"d3b3353a-9fe4-4b97-a75c-19eed73e45d3","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Category","status_code":200,"response_time_ms":1491,"ts":1777903119479,"session":"d3b3353a-9fe4-4b97-a75c-19eed73e45d3","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Page","status_code":500,"response_time_ms":69,"ts":1777903144362,"session":"d58b0afa-1626-4d93-a61a-f53b61ec834d","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Category","status_code":200,"response_time_ms":1526,"ts":1777903145819,"session":"d58b0afa-1626-4d93-a61a-f53b61ec834d","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Category","status_code":200,"response_time_ms":1993,"ts":1777903420163,"session":"b40ae4d9-5a13-474d-a2d6-7ef5592400b6","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Page","status_code":200,"response_time_ms":2001,"ts":1777903420171,"session":"b40ae4d9-5a13-474d-a2d6-7ef5592400b6","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Page","status_code":200,"response_time_ms":1622,"ts":1777905271993,"session":"bb549db6-74f4-46a6-aa7d-12ff2aec7048","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Category","status_code":200,"response_time_ms":1794,"ts":1777905272165,"session":"bb549db6-74f4-46a6-aa7d-12ff2aec7048","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Category","status_code":200,"response_time_ms":3579,"ts":1777905284978,"session":"bb549db6-74f4-46a6-aa7d-12ff2aec7048","uid":"agent","uin":100001}
