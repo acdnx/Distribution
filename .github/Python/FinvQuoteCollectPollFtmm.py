@@ -7,7 +7,7 @@ import sys
 import tempfile
 from datetime import timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List
 
 # 本脚本与下列同目录模块一起工作，显式加入搜索路径以保证任意 cwd 下可导入
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -73,9 +73,17 @@ STATE_KEY = "usc"
 # 且 b.provider='FTMM'，故：
 #   · 不查 flag_enable（视图未暴露该列），也**不要**在客户端拼该过滤条件；
 #   · 取到的行天然都是启用中的 FTMM 品种，无需再按 provider 过滤。
+# 2026-09-25 追加 moomoo 请求参数列（列名按视图定义，前五个为驼峰、req_section 为下划线）：
+#   stockId / marketType / marketCode / instrumentType / subInstrumentType / req_section
+#   —— 视图优先策略：本地枚举未登记的品种直接用视图参数请求 moomoo（type 恒为 2=分钟线，
+#      不占视图列，由 MoomooQuoteV2WebRestClient 硬编码），不再逐个外呼远程配置服务。
+#   type_symbol（视图直出，如 stock/etfs/futures）用于美股个股 req_section 自动补充判定
+#   （口径：region=US 且（type_symbol=stock 或 marketType=2 且 instrumentType=3）才补 "1"）。
 STATE_VIEW_COLUMNS = ("usc,name_sc,region,market,timezone,provider,symbol,futu_symbol,"
                       "dt_last_check,dt_last_fetch,ts_latest_data,count_last_fetch,"
-                      "count_fail,count_stale,weight_priority,weight_frequency")
+                      "count_fail,count_stale,weight_priority,weight_frequency,"
+                      "stockId,marketType,marketCode,instrumentType,subInstrumentType,req_section,"
+                      "type_symbol")
 # 执行日志里记录视图自带的筛选口径（自证：为什么日志里没有 flag_enable 过滤）
 STATE_VIEW_FILTER = "视图定义：flag_enable=1（z/a/b 三表）且 provider=FTMM"
 DRY_RUN = os.environ.get("POLL_DRY_RUN", "").strip().lower() in ("true", "1", "yes", "on")
@@ -177,11 +185,15 @@ def load_state(client):
     （z/a/b 三表 flag_enable='1' 且 provider='FTMM'），且该列并不在视图暴露的列里，
     客户端硬拼会直接 400。
 
-    状态映射每项含三组键：
+    状态映射每项含四组键：
       · 头部元数据（视图直出）：usc / name / region / market / timezone / symbol
       · 调度权重（视图直出）：weight_base（← weight_priority）/ weight_freq（← weight_frequency）
       · 状态字段（回写表用）：time_last_check / time_last_fetch / ts_latest_data /
         count_last_fetch / count_fail / count_stale
+      · 行情请求参数（视图直出，2026-09-25 起）：view_quote_params —— 收集
+        stockId / marketType / marketCode / instrumentType / subInstrumentType / req_section
+        六列原值（字符串化、已 strip），交给 MoomooQuoteV2WebRestClient 做「视图优先」解析
+        （完整性校验与 type=2 硬编码都在客户端侧，本脚本不做业务判定）
     """
     query_string = "select=%s&order=%s.asc" % (STATE_VIEW_COLUMNS, STATE_KEY)
     text = client.query(STATE_VIEW, query_string)
@@ -190,7 +202,7 @@ def load_state(client):
         raise SupabaseRestError("状态视图查询响应不是 JSON 数组")
 
     usc_list: List[str] = []
-    state_map: Dict[str, Dict[str, Union[str, int]]] = {}
+    state_map: Dict[str, Dict[str, object]] = {}
     for row in rows:
         usc = str(row.get(STATE_KEY) or "").strip()
         if not usc:
@@ -214,6 +226,23 @@ def load_state(client):
             "count_last_fetch": _to_int(row.get("count_last_fetch")),
             "count_fail": _to_int(row.get("count_fail")),
             "count_stale": _to_int(row.get("count_stale")),
+            # —— 行情请求参数（视图直出；列名驼峰与下划线混排，见 STATE_VIEW_COLUMNS 注释） ——
+            # 2026-09-25 起视图补充 moomoo 请求参数列，未登记本地枚举的品种（如 03081/03170/
+            # 03439）可凭视图参数直连 moomoo，不再依赖 cfgdistnet 远程配置（其上并无这些 JSON）。
+            # 原样字符串化传出，完整性判定与兜底回落（本地枚举→远程配置）由行情客户端负责；
+            # region / type_symbol 一并带上，供客户端做美股个股 req_section 自动补充判定。
+            "view_quote_params": {
+                "stock_id": str(row.get("stockId") or "").strip(),
+                "market_type": str(row.get("marketType") or "").strip(),
+                "market_code": str(row.get("marketCode") or "").strip(),
+                "instrument_type": str(row.get("instrumentType") or "").strip(),
+                "sub_instrument_type": str(row.get("subInstrumentType") or "").strip(),
+                # 视图列名即 req_section（下划线）；空/NULL → 不传 req_section（客户端 omitempty，
+                # 但美股个股由客户端自动补 "1"，见 MoomooQuoteV2WebRestClient.VIEW_REGION_US）
+                "req_section": str(row.get("req_section") or "").strip(),
+                "region": str(row.get("region") or "").strip(),
+                "type_symbol": str(row.get("type_symbol") or "").strip(),
+            },
         }
     print("[状态] 从视图 %s 加载成功：%d 个品种（筛选口径由视图定义负责）"
           % (STATE_VIEW, len(usc_list)))
@@ -492,9 +521,12 @@ def collect_single(usc, meta):
 
     文件头部的 Symbol / Name / Region / Market / TimeZone 直接取状态视图的元数据
     （2026-09-25 起不再依赖 Config.json 关联）；请求代码即 usc（原 secu_code）。
+    2026-09-25 起 meta 另含 view_quote_params（视图直出的 moomoo 请求参数），随请求
+    透传给行情客户端（视图优先策略；模式1 不消费该参数，客户端会忽略并提示）。
 
     :param usc: 品种身份（视图主键，同时写入 # SecuCode / # USC 与落点目录）
-    :param meta: load_state 给出的视图元数据（name/region/market/timezone/symbol）
+    :param meta: load_state 给出的视图元数据（name/region/market/timezone/symbol/
+                 view_quote_params）
     """
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     now = nowBeijing()
@@ -506,7 +538,7 @@ def collect_single(usc, meta):
     fetch_time = fmtDisplay(now)
     print("[采集] 开始处理品种: %s（名称: %s），北京时间 %s"
           % (usc, meta.get("name") or "无名称", fetch_time))
-    raw = fetchFiveDayMinuteQuote(usc)
+    raw = fetchFiveDayMinuteQuote(usc, view_params=meta.get("view_quote_params"))
     if not raw:
         return None
     minute_list = extractMinuteList(raw)

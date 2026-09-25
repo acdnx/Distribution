@@ -215,17 +215,19 @@ def isQuoteSourceReady():
     return isApiBaseUsable(resolveApiBase())
 
 
-def _fetch_moomoo_minute_quote(secu_code, timeout, base_url):
+def _fetch_moomoo_minute_quote(secu_code, timeout, base_url, view_params=None):
     """模式2 分支：委托给 MoomooQuoteV2WebRestClient 直连 moomoo
 
     契约与模式1 分支一致（成功返回 dict、失败返回 None），故调用方无需感知差别。
+    view_params（视图直出的行情请求参数）原样透传，解析策略（视图优先 → 本地枚举 →
+    远程配置）由模式2 文件负责。
     """
     if base_url:
         print("[行情] 提示：模式2 不使用端点参数，已忽略传入的 base_url")
     client = _load_moomoo_client()
     if client is None:
         return None
-    return client.fetchFiveDayMinuteQuote(secu_code, timeout=timeout)
+    return client.fetchFiveDayMinuteQuote(secu_code, timeout=timeout, view_params=view_params)
 
 
 def resolveApiBase(base_url=None):
@@ -298,25 +300,32 @@ def maskApiUrl(url):
     return "%s%s%s%s%s" % (prefix, masked_host, masked_path, sep, query)
 
 
-def fetchFiveDayMinuteQuote(secu_code, base_url=None, timeout=DEFAULT_TIMEOUT, *, mode=None):
+def fetchFiveDayMinuteQuote(secu_code, base_url=None, timeout=DEFAULT_TIMEOUT, *,
+                            mode=None, view_params=None):
     """拉取单个证券的分钟线行情（按当前模式分发：1=端点 / 2=直连 moomoo）
 
-    **签名向后兼容**：新增的 mode 是仅限关键字、可选参数，原有调用
+    **签名向后兼容**：新增的 mode / view_params 均为仅限关键字、可选参数，原有调用
     `fetchFiveDayMinuteQuote(code)` / `(code, base_url)` / `(code, base_url, timeout)`
-    行为与返回结构完全不变（默认走 QUOTE_FETCH_MODE 常量 = MODE_CFP_ENDPOINT = 原有实现）。
+    行为与返回结构完全不变（默认走 QUOTE_FETCH_MODE 常量）。
 
     :param secu_code: 证券代码（如 HSI / 000001 / NVDA）
     :param base_url: 显式端点（**仅模式1 使用**）；None 时按 resolveApiBase 的规则解析
     :param timeout: 单次请求超时秒数，默认 30（模式2 的默认值在模式2 文件内，为与 Go 一致的 15）
     :param mode: 显式指定模式（**仅供测试/灰度**）；None 表示用 QUOTE_FETCH_MODE 常量
+    :param view_params: 状态视图直出的行情请求参数（**仅模式2 消费**，2026-09-25 起）；
+                        键为 stock_id / market_type / market_code / instrument_type /
+                        sub_instrument_type / req_section。完整则模式2 最高优先采用；
+                        模式1 不消费该参数（给非空值时打提示忽略）
     :return: 成功 → 行情 JSON dict（已校验 code == 1 且 data 非空）；
              失败 → None（不抛异常，诊断信息已 print）
     """
     effective_mode = currentQuoteMode() if mode is None else mode
     if effective_mode == MODE_MOOMOO:
-        return _fetch_moomoo_minute_quote(secu_code, timeout, base_url)
+        return _fetch_moomoo_minute_quote(secu_code, timeout, base_url, view_params=view_params)
 
     # ---------- 以下为模式1（端点模式）的原有实现 ----------
+    if view_params:
+        print("[行情] 提示：模式1 不使用视图行情参数，已忽略传入的 view_params")
     base = resolveApiBase(base_url)
     if not isApiBaseUsable(base):
         # 端点未配置（占位符）或形态非法：明确报错并走失败契约，
