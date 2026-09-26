@@ -39,7 +39,7 @@ LOG_DIR = "Data/Finv/SecurityQuoteV5/ExecLog"    # 执行日志落点目录
 
 # ============ 调度常量 ============
 # 单次运行采集的标的数量。按需求写死在此，后续如需调整直接改这里。
-POLL_COUNT = 3
+POLL_COUNT = 5
 FORCE_FETCH_INTERVAL = 72 * 3600          # 距上次检查超过 72 小时强制采集（秒）
 # 时钟异常容忍（秒）：状态列时间戳比「本次运行时刻」超前超过该阈值，即视为脏值。
 # 背景（2026-09-25 实测定案）：状态表 finv_quote_collect_state_poll_futu 是**跨数据源共享**
