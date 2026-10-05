@@ -1,4 +1,4 @@
-name: quote.SupabaseImportWeekMvsv
+name: SupabaseImportWeekMvsv
 
 on:
   schedule:
@@ -8,19 +8,19 @@ on:
     # （周升序队列 + 公平顺序 + 配额，见 docstring 第十三节）。
     # 「配额」是**当天至少要导够的行数**（下限）：队列里还有货就继续取，一轮可以跨周。
     # 注意：GitHub 的 cron 一律按 **UTC** 解释，与仓库时区、运行环境时区都无关
-    # （北京 00:01 = UTC 16:01）。
+    # （北京 00:30 = UTC 16:30）。
     # 时序：周界 = UTC 周日 00:00 = 北京周日 08:00，到本次运行之间隔约 16.5 小时 ——
     # 新的一周在北京周日早上就已就绪，但要到北京周一凌晨才被首次处理。
-    - cron: '01 16 * * *'
+    - cron: '30 16 * * *'
   workflow_dispatch:
     inputs:
       code:
-        description: 证券代码（如 IAU；留空 = 取 finv_quote_secu 登记表中的全部证券）
+        description: 证券代码（如 IAU；留空 = 取源库 finv_quote_secu_kline_min 中实际有数据的证券）
         type: string
         required: false
         default: ''
       week:
-        description: 目标周 yyyyWW（如 202625）。留空 = 走每日批次；填了则手动导该周，全部证券同一周且不受配额限制
+        description: 目标周 yyyyWW（如 202625）。留空 = 走每日批次；填了则手动导该周，候选证券同一周且不受配额限制
         type: string
         required: false
         default: ''
@@ -53,7 +53,7 @@ concurrency:
 jobs:
   SupabaseImportWeekMvsv:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
     steps:
       # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 quote
       - uses: actions/checkout@v4
@@ -84,12 +84,13 @@ jobs:
           # 必填：Supabase 凭据（Data API 读 finv_quote_secu_kline_min 用）
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # 待导出证券：手动触发取输入（可逗号分隔多个）；留空则取
-          # finv_quote_secu 登记表中的全部 usc。多个时**逐个独立处理**
+          # 待导出证券：手动触发取输入（可逗号分隔多个）；留空则取源库
+          # finv_quote_secu_kline_min 中**实际有数据**的证券（盘点所得；登记表里
+          # 源库无数据的行不再逐只探测）。多个时**逐个独立处理**
           # （各自查询 / 各自一份文件 / 各自一次提交）
           SECU_CODE: ${{ inputs.code }}
           # 目标周：留空 = 走每日批次（周升序队列 + 公平顺序 + 配额，见 docstring 第十三节）；
-          # 填了 = 手动路径，全部证券同一周且**不受每日配额限制**（运维动作）
+          # 填了 = 手动路径，候选证券同一周且**不受每日配额限制**（运维动作）
           WEEK: ${{ inputs.week }}
           SUPABASE_PAGE_SIZE: ${{ inputs.pageSize || '1000' }}
           # 每日导出配额（**数据行数**）。刻意走**仓库变量**而非 workflow_dispatch 输入：
