@@ -113,14 +113,14 @@ public.finv_quote_secu_kline_min 里「某个证券 + 某个整周」的分钟�
 
 五、落点路径
 ----------------------------------------------------------------------------------------
-    Data/Finv/SecuQuoteWeek/FT/{region}_{market}/{Code}/{region}_{market}_{Code}_MIN_FT_{yyyyWW}.mvsv
+    Data/Finv/SecuQuoteWeek/FT/{region}_{market}/{Code}/{region}_{market}_{Code}_Min_FT_Week_{yyyyWW}.mvsv
 
 例（Code=IAU / region=US / market=ARCA / yyyyWW=202625）：
-    Data/Finv/SecuQuoteWeek/FT/US_ARCA/IAU/US_ARCA_IAU_MIN_FT_202625.mvsv
+    Data/Finv/SecuQuoteWeek/FT/US_ARCA/IAU/US_ARCA_IAU_Min_FT_Week_202625.mvsv
 
 与既有 Day 规范 Data/Finv/SecuQuote/FT/{Freq}/{Region}_{Market}/{Code}/… **七层同构**，
-唯一差异是频率段与日期段（_Min_FT_yyyyMMdd ↔ _MIN_FT_yyyyWW）：_FT_ 段的位置、大小写
-与既有 Day 文件完全一致，只有频率标记（Min/MIN）和周/日粒度不同。
+唯一差异是频率段与日期段（_Min_FT_yyyyMMdd ↔ _Min_FT_Week_yyyyWW）：_FT_ 段的位置与既有
+Day 文件一致，只有频率标记（Min）以及「周/日粒度 + Week 标签」不同。
 
 Region / Market 取自登记表 `finv_quote_secu` 的 `region` / `market` 两列（见第三节）。
 
@@ -128,8 +128,8 @@ Region / Market 取自登记表 `finv_quote_secu` 的 `region` / `market` 两列
 ----------------------------------------------------------------------------------------
 导出前先**探测目标分支上该文件是否已存在**；已存在则打印日志，并改用 `_N` 后缀规避：
 
-    …/US_ARCA_IAU_MIN_FT_202625.mvsv      常规（不存在时）
-    …/US_ARCA_IAU_MIN_FT_202625_1.mvsv    同名冲突时，N 从 1 起取第一个未占用的
+    …/US_ARCA_IAU_Min_FT_Week_202625.mvsv      常规（不存在时）
+    …/US_ARCA_IAU_Min_FT_Week_202625_1.mvsv    同名冲突时，N 从 1 起取第一个未占用的
 
 **为什么是「另存」而不是「覆盖」**：commit_content 本身幂等（同路径＝覆盖更新），但覆盖会
 让「上一份导出」无声消失。加后缀后每份导出各自留痕，下游可按 `_N` 分辨先后。
@@ -369,16 +369,16 @@ PROVIDER = "FT"
 TARGET_DIR_TEMPLATE = "Data/Finv/SecuQuoteWeek/FT/%s_%s/%s"
 
 # 落点路径模板（见模块 docstring 第五节）
-TARGET_PATH_TEMPLATE = TARGET_DIR_TEMPLATE + "/%s_%s_%s_MIN_FT_%04d%02d.mvsv"
+TARGET_PATH_TEMPLATE = TARGET_DIR_TEMPLATE + "/%s_%s_%s_Min_FT_Week_%04d%02d.mvsv"
 
 # 同名冲突规避：目标文件已存在时改用 _N 后缀（见 docstring 第六节）
 TARGET_PATH_CONFLICT_TEMPLATE = \
-    TARGET_DIR_TEMPLATE + "/%s_%s_%s_MIN_FT_%04d%02d_%d.mvsv"
+    TARGET_DIR_TEMPLATE + "/%s_%s_%s_Min_FT_Week_%04d%02d_%d.mvsv"
 CONFLICT_SUFFIX_MAX = 99
 
-# 文件名反解用的正则**模板**：<Region>_<Market>_<Code>_MIN_FT_<yyyy><WW>[_N].mvsv
+# 文件名反解用的正则**模板**：<Region>_<Market>_<Code>_Min_FT_Week_<yyyy><WW>[_N].mvsv
 # 周号**零填充两位**（%04d%02d），故 `202605` 不会误配 `202650`（见 docstring 第十三节）
-EXPORT_NAME_RE_TEMPLATE = r"^%s_%s_%s_MIN_FT_(\d{4})(\d{2})(?:_\d+)?\.mvsv$"
+EXPORT_NAME_RE_TEMPLATE = r"^%s_%s_%s_Min_FT_Week_(\d{4})(\d{2})(?:_\d+)?\.mvsv$"
 
 # 周结束距今至少需要的天数（见 docstring 第二节）
 WEEK_END_LAG_DAYS = 14
