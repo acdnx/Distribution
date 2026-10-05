@@ -53,7 +53,7 @@ concurrency:
 jobs:
   SupabaseImportWeekMvsv:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       # 检出所选分支：手动触发用输入的分支；定时触发（无 inputs）回落本工作流所属分支 quote
       - uses: actions/checkout@v4
