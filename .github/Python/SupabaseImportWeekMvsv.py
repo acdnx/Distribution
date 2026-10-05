@@ -49,8 +49,8 @@ public.finv_quote_secu_kline_min 里「某个证券 + 某个整周」的分钟�
     （按主键翻页，见第十二节），既作准入名单，也供落点路径的 `region` / `market`
     （见第五节）与文件头的 `# 时区` / `# Timezone`（见第四节）。
 
-    - 取不到该 usc（**未登记**）  → 该证券**根本不在名单里**，不会被尝试；若源库存有数据，
-      由第十二节的盘点逐只点名；
+    - 取不到该 usc（**未登记**）  → **不允许导出**；若源库存有数据，会进入候选名单并被记为
+      「未登记」而不产出文件，第十二节的盘点亦逐只点名；
     - 已登记但 `timezone` 为空     → 跳过（文件头必须有时区值）；
     - 登记表**全量查询本身失败**   → 名单无从确定，**整轮硬失败退出**（不再逐证券重试）。
 
@@ -176,7 +176,8 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
     SUPABASE_PAGE_SIZE     单页行数（默认 1000）
     SUPABASE_ENABLE_DELETE 删除源库开关（脚本默认关、工作流默认开；见第七节）
     SECU_CODE              证券代码，多个以逗号分隔（如 IAU 或 IAU,GLD）；
-                           **留空则取 `finv_quote_secu` 登记表中的全部 usc**
+                           **留空则取源库（`finv_quote_secu_kline_min`）中实际有数据的证券**
+                           （经第十二节盘点得到；登记表里源库无数据的行不再逐只探测）
     WEEK                   目标周 yyyyWW（可省；省则取该证券「最早一条记录」所在的周）
     CURR_BRANCH / GITHUB_REF_NAME   目标分支（默认 quote）
 
@@ -258,6 +259,12 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
 `INVENTORY_MAX_SECU` 兜住上游证券数暴增。登记表则不同 —— 它是名单本身，取不到即整轮退出
 （见第三节）。
 
+盘点结果**同时回流给主流程当候选名单**：`SECU_CODE` 留空时只处理「源库实际有数据」的那些
+证券，不再对登记表全量逐只探测 —— 两份名单的行数可以差出几个数量级（ACANX 2026-10-05：
+登记表 38986 行、源库有数据仅 28 个），对无数据的行逐只探测会把运行拖进超时。盘点得到的
+「每个证券最早记录 ts」也一并在定周时复用（见第十三节 `plan_daily_batch`）。若盘点未完成
+（失败 / 触 `INVENTORY_MAX_SECU`），为不漏导而回退登记表全量逐只探测。
+
 十三、每日批次：周优先队列与配额（2026-09-15）
 ----------------------------------------------------------------------------------------
 目标（ACANX 2026-09-15 定）：**每天都有货交付**，而不是每周集中爆一次、其余六天闲置。
@@ -296,7 +303,7 @@ DMDCBWD31MigrationFile 采集后删除，故文件被取走后就不再算冲突
 ⇒ 约 7600 行/天）。**高于**它则是在追历史积压（当前 WW25…WW35 共 11 周待补，配额 10132
 即属此列）；追平后若不回调，每周的第 6~7 天会无事可做。
 
-显式指定 `WEEK` 时走**手动路径**：全部证券同一周、**不受配额限制**（运维动作而非日常调度）；
+显式指定 `WEEK` 时走**手动路径**：候选证券同一周、**不受配额限制**（运维动作而非日常调度）；
 此时同名文件按第六节加 `_N` 后缀，允许重复导出，用于数据订正。
 
 【环境要求】Python 3.8+，仅标准库；可直连 api.github.com 与 *.supabase.co。
@@ -804,6 +811,8 @@ def audit_secu_inventory(client, registry):
     盘点失败**不阻断导出**：只记告警，主流程照常。
 
     :param registry: 已取回的登记表 {usc: (region, market, timezone)}（由 main 传入，避免重复查询）
+    :return: (source, truncated, err)：`source` = 源库实际有数据证券的 [(usc, 最早 ts)]，
+        供主流程收敛待处理范围并复用最早 ts；`truncated` / `err` 透传自 `scan_source_secus`
     """
     _log("")
     _log("===== 源库证券盘点（%s）=====" % TABLE)
@@ -856,8 +865,11 @@ def audit_secu_inventory(client, registry):
         _log("⚠️ 已登记但 timezone 为空 %d 个（补上 timezone 即放行）：%s"
              % (len(no_tz), ", ".join(no_tz)))
     if no_data:
-        _log("⚠️ 已登记但源库无数据 %d 个（仍会被尝试；因 usc 探测 0 行，将记为 failed）—— "
-             "要么上游没采，要么 Code 形态不符：%s" % (len(no_data), ", ".join(no_data)))
+        _log("⚠️ 已登记但源库无数据 %d 个 —— 不再逐只探测（否则会拖垮运行）；"
+             "要么上游没采，要么 Code 形态不符，补采后下次运行即会纳入：%s"
+             % (len(no_data), ", ".join(no_data)))
+
+    return source, truncated, err
 
 
 def fetch_week_rows(client, usc, start_ts, end_ts, page_size):
@@ -1202,16 +1214,19 @@ def pending_week(earliest_label, exported_weeks, max_label):
     return None
 
 
-def plan_daily_batch(client, cfg, registry, codes):
+def plan_daily_batch(client, cfg, registry, codes, earliest_map=None):
     """定出本次批次的队列：导哪些证券、各自的周、按什么顺序（docstring 第十三节）
 
     每只证券各一次源库查询（复用 `week_of_earliest_record`，同时充当 usc 有效性探测）
-    与一次目标仓库目录列举 —— N 只证券约 2N 次请求。
+    与一次目标仓库目录列举 —— N 只证券约 2N 次请求。若调用方已从第十二节的源库盘点拿到
+    该证券的最早记录 ts（`earliest_map`），则直接定周、**跳过这次源库查询**，请求数降到 N。
 
     队列**装下所有**待导证券（不是只装最早那一周）：先按周升序，同一周内按 `weekly_order`
     排。每只证券导**它自己**的最早未产出周 —— 故一轮里不同证券可能落在不同的周上，
     这是「跨周」的正常形态（见 docstring 第十三节①）。
 
+    :param earliest_map: {code: 源库最早记录 ts}（来自第十二节盘点）；命中的证券直接定周，
+        不再逐只查源库。None / 未命中（手动指定、盘点未覆盖）回落 `week_of_earliest_record`。
     :return: (plan, error)。plan 为 dict：
         - queue:   [(code, (iso_year, iso_week)), ...]，已按周升序 + 周内公平顺序排好；
                    无待导时为空列表
@@ -1234,10 +1249,19 @@ def plan_daily_batch(client, cfg, registry, codes):
             blocked[code] = "已登记但 timezone 为空（文件头缺值，不予导出）"
             continue
 
-        earliest_ts, earliest_label = week_of_earliest_record(client, code)
-        if earliest_ts is None:
-            blocked[code] = "源库无任何记录（usc 探测 0 行）"
-            continue
+        # 优先复用盘点得到的最早 ts（省一次源库查询）；未命中再逐只探测
+        first_ts = earliest_map.get(code) if earliest_map else None
+        if first_ts is not None:
+            try:
+                earliest_label = iso_label_of(datetime.datetime.fromtimestamp(
+                    int(first_ts), tz=datetime.timezone.utc))
+            except (TypeError, ValueError, OSError, OverflowError):
+                first_ts = None
+        if first_ts is None:
+            earliest_ts, earliest_label = week_of_earliest_record(client, code)
+            if earliest_ts is None:
+                blocked[code] = "源库无任何记录（usc 探测 0 行）"
+                continue
 
         exported, _names, err = list_exported_weeks(cfg, region, market, code)
         if err:
@@ -1305,7 +1329,7 @@ def resolve_config():
               os.environ.get("CURR_BRANCH", "") or os.environ.get("GITHUB_REF_NAME", "")).strip() \
         or DEFAULT_BRANCH
 
-    # 留空 = 取登记表 finv_quote_secu 中的全部 usc（由 main 取回登记表后补齐）
+    # 留空 = 取源库中实际有数据的证券（由 main 盘点后补齐，见第十二节）
     codes = [c.strip() for c in codes_raw.split(",") if c.strip()] or None
 
     page_size_raw = os.environ.get("SUPABASE_PAGE_SIZE", "").strip()
@@ -1501,7 +1525,7 @@ def purge_source_rows(client, cfg, code, start_ts, end_ts, exported_rows):
 
 
 def main():
-    """入口：解析配置 → 取登记表 →（定批次）→ 逐证券处理 → 汇总退出码"""
+    """入口：解析配置 → 取登记表 → 盘点源库并收敛候选 →（定批次）→ 逐证券处理 → 汇总退出码"""
     _ensure_console_utf8()
     # 依赖模块写往 stderr 的告警也带上时间前缀（stdout 侧由 _log 负责）
     sys.stderr = _TimestampedStream(sys.stderr)
@@ -1533,12 +1557,8 @@ def main():
              % (SECU_TABLE, err))
         return 1
 
-    # 未指定证券时取登记表中的全部 usc（按主键升序，结果可复现）
-    codes = cfg["codes"] if cfg["codes"] else list(registry.keys())
     if cfg["codes"]:
-        _log("[INFO] 待处理证券取自参数：%d 个" % len(codes))
-    else:
-        _log("[INFO] 未指定证券 → 取 %s 登记表中的全部证券：%d 个" % (SECU_TABLE, len(codes)))
+        _log("[INFO] 待处理证券取自参数：%d 个" % len(cfg["codes"]))
 
     _log("[INFO] 目标分支 = %s" % cfg["branch"])
     _log("[INFO] 删除源库开关 %s = %s" % (ENV_ENABLE_DELETE,
@@ -1547,20 +1567,37 @@ def main():
          % (ENV_DAILY_QUOTA,
             "不限额" if cfg["daily_quota"] <= 0 else "%d 行" % cfg["daily_quota"]))
 
-    # 逐证券处理之前先盘一次源库存量：把「上游在采、这边名单里没有」的证券逐只点名
-    audit_secu_inventory(client, registry)
+    # 逐证券处理之前先盘一次源库存量：把「上游在采、这边名单里没有」的证券逐只点名，
+    # 并取回「源库实际有数据」的清单 —— 主流程据此把候选从登记表全量收敛到有数据的那些
+    source, truncated, inv_err = audit_secu_inventory(client, registry)
+
+    # 待处理名单：显式指定则用参数；留空则**只取源库有数据的**（第十二节盘点所得）。
+    # 盘点得到的「最早记录 ts」透传给 plan_daily_batch，省去逐只重查源库。
+    earliest_map = dict(source)
+    if cfg["codes"]:
+        codes = cfg["codes"]
+    elif inv_err or truncated:
+        # 盘点不完整（失败 / 触遍历上限）：名单无法确定 —— 回退登记表全量逐只探测，
+        # 宁可慢也不静默漏导（异常路径，正常不会走到）
+        codes = list(registry.keys())
+        _log("[WARN] 源库盘点不完整（%s）—— 回退为登记表全量逐只探测：%d 个"
+             % (inv_err or ("触遍历上限 %d" % INVENTORY_MAX_SECU), len(codes)))
+    else:
+        codes = [c for c, _ in source]
+        _log("[INFO] 未指定证券 → 取源库有数据的证券：%d 个（登记表 %d 个）"
+             % (len(codes), len(registry)))
 
     # 两条路径（docstring 第十三节）：
-    #   手动 —— 显式指定 WEEK：运维动作，全部证券同一周，**不受每日配额限制**
+    #   手动 —— 显式指定 WEEK：运维动作，候选证券同一周，**不受每日配额限制**
     #   日常 —— 队列按周升序装下所有待导，导到「≥ 每日配额」才收工（可跨周）
     if cfg["week_raw"]:
-        _log("[INFO] 目标周：%s（全部证券同一周；手动路径，**不受每日配额限制**）"
+        _log("[INFO] 目标周：%s（候选证券同一周；手动路径，**不受每日配额限制**）"
              % cfg["week_raw"])
         queue = [(code, None) for code in codes]
         quota = 0
     else:
         _log("[INFO] 目标周：未指定 → 走每日批次（周升序队列 + 公平顺序 + 配额）")
-        plan, err = plan_daily_batch(client, cfg, registry, codes)
+        plan, err = plan_daily_batch(client, cfg, registry, codes, earliest_map)
         if err:
             _log("❌ 批次计划失败：%s" % err)
             return 1
