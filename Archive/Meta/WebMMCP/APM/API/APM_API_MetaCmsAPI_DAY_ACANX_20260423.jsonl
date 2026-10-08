@@ -1,0 +1,4 @@
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Category","status_code":200,"response_time_ms":404,"ts":1776888502660,"session":"7f25d52d-0fea-4b86-8b7f-7de807f8d87c","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Page","status_code":200,"response_time_ms":408,"ts":1776888502664,"session":"7f25d52d-0fea-4b86-8b7f-7de807f8d87c","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Page","status_code":200,"response_time_ms":396,"ts":1776888504585,"session":"7f25d52d-0fea-4b86-8b7f-7de807f8d87c","uid":"agent","uin":100001}
+{"type":"api","method":"GET","path":"/API/V1/Meta/CMS/Bookmark/Page","status_code":200,"response_time_ms":398,"ts":1776888505551,"session":"7f25d52d-0fea-4b86-8b7f-7de807f8d87c","uid":"agent","uin":100001}
