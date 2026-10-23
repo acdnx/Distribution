@@ -76,7 +76,7 @@ MvsvQuoteBuilder —— MVSV 行情数据文件生成契约库（V5 格式）
     # 标题 : {code} 分钟级行情数据
     # 字段名称 : "时间戳|日期|时间|开盘价|最高价|最低价|收盘价|成交量|成交额|涨跌值|涨跌幅|前收价"
     # DataProvider : FTMM
-    # Field : "ts|d|t|o|h|l|c|v|t|cp|cr|lc"
+    # Field : "ts|da|ti|o|h|l|c|v|t|cp|cr|lc"
     # FieldName : "Timestamp|Date|Time|Open|High|Low|Close|Volume|Turnover|ChangePrice|ChangeRatio|LastClose"
     # FieldType : "Int|Int|Int|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal"
     # TypeKLine : Min
@@ -100,8 +100,8 @@ MvsvQuoteBuilder —— MVSV 行情数据文件生成契约库（V5 格式）
     | 列 | 取值规则                                                        |
     |----|-------------------------------------------------------------------|
     | ts | 数据源时间戳（秒级 Unix），原样                                  |
-    | d  | ts 按**北京时间**换算的 YYYYMMDD                                 |
-    | t  | ts 按**北京时间**换算的 HHMMSS                                   |
+    | da | ts 按**北京时间**换算的 YYYYMMDD                                 |
+    | ti | ts 按**北京时间**换算的 HHMMSS                                   |
     | o  | 开盘价 = **前 60 秒（前一分钟）记录**的收盘价；该分钟无记录时为空      |
     | h  | 恒为空（FTMM 分钟线接口不提供 high）                             |
     | l  | 恒为空（FTMM 分钟线接口不提供 low）                              |
@@ -186,7 +186,7 @@ from DateTimeUtil import BEIJING_TZ
 PROVIDER = "FTMM"
 # 字段布局（# Field；注意 v 后面的第二个 t 是成交额，与第 3 列时间同名，为既定怪癖）
 # 价格四列顺序为 Open|High|Low|Close（o|h|l|c），2026-09-25 用户明确要求
-FIELD_LAYOUT = "ts|d|t|o|h|l|c|v|t|cp|cr|lc"
+FIELD_LAYOUT = "ts|da|ti|o|h|l|c|v|t|cp|cr|lc"
 # 字段名称（# 字段名称，中文；12 项，与 # Field / # FieldName / # FieldType 一一对齐；
 # 第 12 项「前收价」= LastClose = lc，2026-09-25 经用户确认补入）
 FIELD_NAMES_CN = ("时间戳|日期|时间|开盘价|最高价|最低价|收盘价|成交量|成交额|涨跌值|涨跌幅"
@@ -197,7 +197,7 @@ FIELD_NAMES_EN = ("Timestamp|Date|Time|Open|High|Low|Close|Volume|Turnover"
 # 字段类型（# FieldType，3 Int + 9 Decimal；价格四列同为 Decimal，故列序调整不影响本行）
 FIELD_TYPES = "Int|Int|Int|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal"
 # 数据行字段序（与 FIELD_LAYOUT 一一对应）
-DATA_ROW_KEYS = ("ts", "d", "t", "o", "h", "l", "c", "v", "t", "cp", "cr", "lc")
+DATA_ROW_KEYS = ("ts", "da", "ti", "o", "h", "l", "c", "v", "t", "cp", "cr", "lc")
 
 
 def _assert_contract_consistent():
@@ -410,7 +410,7 @@ def _build_data_rows(minute_list):
             # 开盘价 = 前一分钟（ts−60）记录的收盘价；该分钟无记录则为空
             o_txt = _fmt(close_by_ts.get(ts_int - 60))
         # o 与 lc **恒等**（同取前一分钟收盘价）；h / l 接口不提供恒为空
-        # 列序：ts | d | t | o | h | l | c | v | t | cp | cr | lc（OHLC 常规顺序）
+        # 列序：ts | da | ti | o | h | l | c | v | t | cp | cr | lc（OHLC 常规顺序）
         rows.append("|".join([
             _fmt(ts), d_txt, t_txt, o_txt, "", "", _fmt(item.get("c")),
             _fmt(item.get("v")), _fmt(item.get("t")), _fmt(item.get("cp")),
