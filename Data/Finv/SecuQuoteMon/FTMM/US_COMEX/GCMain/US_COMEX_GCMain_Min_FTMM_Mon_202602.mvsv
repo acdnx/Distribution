@@ -5,7 +5,7 @@
 # FieldName : "Timestamp|Date|Time|Open|High|Low|Close|Volume|Turnover|ChangePrice|ChangeRatio|LastClose"
 # FieldType : "Int|Int|Int|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal"
 # TypeKLine : Min
-# Count : 27451
+# Count : 27450
 # Symbol : COMEX.GCMain
 # SecuCode : GCMain
 # USC : GCMain
@@ -15,7 +15,6 @@
 # TimeZone : America/New_York
 # Currency : USD
 
-1769922000|20260201|0|4816|5299|4423.2|5296.4|3011089|0|||4907.5
 1769986860|20260201|180100|4816|4824.9|4780.4|4803.1|1005|0|||4907.5
 1769986920|20260201|180200|4803|4824.7|4792.6|4824.6|647|0|||4803.1
 1769986980|20260201|180300|4824.2|4863.8|4821.3|4863.8|721|0|||4824.6
