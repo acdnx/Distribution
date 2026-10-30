@@ -31,9 +31,9 @@ from SupabaseRestClient import SupabaseRestClient, SupabaseRestError, eqFilter
 
 # ============ 数据落点常量（按需求锁定：ACANX/Distribution @ quote）============
 # 刻意不走 Commit.json / .git 解析（那里登记的是 acdnx/Distribution 转存端）。
-GITHUB_OWNER = "ACANX"
-GITHUB_REPO = "Distribution"
-GITHUB_BRANCH = "quote"
+GITHUB_OWNER = "acdnx"
+GITHUB_REPO = "Dist"
+GITHUB_BRANCH = "collect-quote"
 DATA_DIR = "Data/Finv/SecurityQuoteV5/FTMM/Min"          # MVSV 数据文件落点目录
 LOG_DIR = "Data/Finv/SecurityQuoteV5/ExecLog"    # 执行日志落点目录
 
