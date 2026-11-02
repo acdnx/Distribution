@@ -1,0 +1,17 @@
+# 标题 : SH000015 分钟级行情数据
+# 字段名称 : "时间戳|日期|时间|开盘价|最高价|最低价|收盘价|成交量|成交额|涨跌值|涨跌幅|前收价"
+# DataProvider : FTMM
+# Field : "ts|da|ti|o|h|l|c|v|t|cp|cr|lc"
+# FieldName : "Timestamp|Date|Time|Open|High|Low|Close|Volume|Turnover|ChangePrice|ChangeRatio|LastClose"
+# FieldType : "Int|Int|Int|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal|Decimal"
+# TypeKLine : Min
+# Count : 0
+# Symbol : SH.SH000015
+# SecuCode : SH000015
+# USC : SH000015
+# Name : 红利指数
+# Region : CN
+# Market : SH
+# TimeZone : Asia/Shanghai
+# Currency : CNY
+
