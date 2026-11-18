@@ -88,8 +88,8 @@ STATE_KEY = "usc"
 #     marketCode → market_code、instrumentType → instrument_type、
 #     subInstrumentType → sub_instrument_type（req_section 保持不变）；
 #   · 视图的 type_symbol 在表里没有同名列，按其语义取 type_secu（stock/etfs/futures 口径）；
-#   · 表**没有 flag_enable 列**：旧视图那层「启用中」筛选在表上不存在，行集合即视为
-#     可采集品种，客户端不再（也无法）拼该过滤条件；
+#   · 表已补 flag_enable（整型）：只采集启用中的品种，查询里显式加 flag_enable=eq.1
+#     （与旧视图三表 flag_enable='1' 的口径一致）；该列只用于过滤，不必出现在 select 里；
 #   · 表保留 provider 列，本作业只采 FTMM 源，故查询里显式加 provider=eq.FTMM，
 #     与旧视图 b.provider='FTMM' 的口径一致，避免采到其它数据源的品种。
 # moomoo 请求参数列（2026-09-25 引入）——表优先策略：本地枚举未登记的品种直接用表列参数
@@ -102,10 +102,10 @@ STATE_VIEW_COLUMNS = ("usc,name,region,market,timezone,provider,symbol,futu_symb
                       "count_fail,count_stale,weight_priority,weight_frequency,"
                       "stock_id,market_type,market_code,instrument_type,sub_instrument_type,"
                       "req_section,type_secu")
-# PostgREST 过滤片段（拼在 query 尾部）：只取 FTMM 源的行
-STATE_VIEW_QUERY_FILTER = "&provider=eq.FTMM"
-# 执行日志里记录的筛选口径（自证：为什么日志里没有 flag_enable 过滤）
-STATE_VIEW_FILTER = "表筛选：provider=FTMM（新表无 flag_enable 列，行集合即可采集品种）"
+# PostgREST 过滤片段（拼在 query 尾部）：只取 FTMM 源、且启用中的行
+STATE_VIEW_QUERY_FILTER = "&provider=eq.FTMM&flag_enable=eq.1"
+# 执行日志里记录的筛选口径（与旧视图口径一致，供日志自证）
+STATE_VIEW_FILTER = "表筛选：provider=FTMM 且 flag_enable=1（整型）"
 DRY_RUN = os.environ.get("POLL_DRY_RUN", "").strip().lower() in ("true", "1", "yes", "on")
 TEMP_DIR = Path(os.environ.get("POLL_TEMP_DIR", "")) if os.environ.get("POLL_TEMP_DIR", "").strip() \
     else Path(tempfile.gettempdir()) / "finv_quote_collect_poll_ftmm"
@@ -203,9 +203,9 @@ def load_state(client):
     表另有 futu_symbol（数据源侧代码）与 symbol（= quote_market.futu_symbol），
     本脚本不使用，如后续需改用 futu_symbol 请先与用户确认。
 
-    **过滤口径**：新表 finv_quote_secu_ft 没有 flag_enable 列（旧视图那层「启用中」
-    筛选在表上不存在，行集合即视为可采集品种），但保留 provider 列，故查询里显式加
-    provider=eq.FTMM（与旧视图 b.provider='FTMM' 一致），避免采到其它数据源的品种。
+    **过滤口径**：新表 finv_quote_secu_ft 带 provider 与 flag_enable（整型）两列，
+    查询里显式加 provider=eq.FTMM 且 flag_enable=eq.1，与旧视图（b.provider='FTMM'、
+    三表 flag_enable='1'）一致：只采集启用中的 FTMM 品种，避免采到其它数据源 / 停用品种。
 
     状态映射每项含四组键：
       · 头部元数据（表直出）：usc / name / region / market / timezone / symbol
@@ -269,7 +269,7 @@ def load_state(client):
                 "type_symbol": str(row.get("type_secu") or "").strip(),
             },
         }
-    print("[状态] 从表 %s 加载成功：%d 个品种（provider=FTMM，其余口径由表行集合负责）"
+    print("[状态] 从表 %s 加载成功：%d 个品种（provider=FTMM 且 flag_enable=1）"
           % (STATE_VIEW, len(usc_list)))
     return usc_list, state_map
 
