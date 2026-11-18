@@ -70,32 +70,42 @@ GIT_COMMIT_TOKEN = os.environ.get("GIT_COMMIT_TOKEN", "").strip()
 # （**纯常量开关，不读环境变量**：MODE_CFP_ENDPOINT=1 为原有端点行为 / MODE_MOOMOO=2 直连 moomoo）；
 # 本作业**不解析该值**，只经 isQuoteSourceReady（启动自检）与 describeQuoteSource（日志）使用；
 # 两种模式的对外契约相同（成功同结构 dict / 失败 None），作业侧采集代码无需区分。
-# 状态读取源 = 视图（列口径见 STATE_VIEW_COLUMNS；视图直出 region/market/timezone/
-# symbol/name_sc/weight_priority/weight_frequency，故本作业**不再依赖任何外部配置文件**）
+# 状态读取源 = 表（列口径见 STATE_VIEW_COLUMNS；表直出 region/market/timezone/
+# symbol/name/weight_priority/weight_frequency，故本作业**不再依赖任何外部配置文件**）
+# 2026-11-18 起由视图 finv_quote_collect_state_poll_futu_view 切换为表 finv_quote_secu_ft；
+# 常量名与 POLL_STATE_VIEW 环境变量保留原样，便于必要时一键回滚。
 STATE_VIEW = os.environ.get("POLL_STATE_VIEW",
-                            "finv_quote_collect_state_poll_futu_view").strip()
-# 状态回写目标 = 表（视图只读，更新一律落表）
+                            "finv_quote_secu_ft").strip()
+# 状态回写目标 = 表（读取源只读，更新一律落本表）
 STATE_TABLE = os.environ.get("POLL_STATE_TABLE", "finv_quote_collect_state_poll_futu").strip()
-# 行身份列：2026-09-25 起表主键由 secu_code 改为 usc（视图与表同名同值）
+# 行身份列：2026-09-25 起主键由 secu_code 改为 usc（读源表与回写表同名同值）
 STATE_KEY = "usc"
-# 视图查询的列清单——**必须与视图定义严格对齐**（PostgREST 对不存在的列直接 400）。
-# 已知视图定义（security_invoker）已自行筛选：z/a/b 三表 flag_enable='1'
-# 且 b.provider='FTMM'，故：
-#   · 不查 flag_enable（视图未暴露该列），也**不要**在客户端拼该过滤条件；
-#   · 取到的行天然都是启用中的 FTMM 品种，无需再按 provider 过滤。
-# 2026-09-25 追加 moomoo 请求参数列（列名按视图定义，前五个为驼峰、req_section 为下划线）：
-#   stockId / marketType / marketCode / instrumentType / subInstrumentType / req_section
-#   —— 视图优先策略：本地枚举未登记的品种直接用视图参数请求 moomoo（type 恒为 2=分钟线，
-#      不占视图列，由 MoomooQuoteV2WebRestClient 硬编码），不再逐个外呼远程配置服务。
-#   type_symbol（视图直出，如 stock/etfs/futures）用于美股个股 req_section 自动补充判定
-#   （口径：region=US 且（type_symbol=stock 或 marketType=2 且 instrumentType=3）才补 "1"）。
-STATE_VIEW_COLUMNS = ("usc,name_sc,region,market,timezone,provider,symbol,futu_symbol,"
+# 数据源查询的列清单——**必须与表列严格对齐**（PostgREST 对不存在的列直接 400）。
+# 2026-11-18 起读取源为表 public.finv_quote_secu_ft（替代视图
+# finv_quote_collect_state_poll_futu_view），列名与视图的差异：
+#   · name_sc → name；
+#   · 驼峰 → 下划线：stockId → stock_id、marketType → market_type、
+#     marketCode → market_code、instrumentType → instrument_type、
+#     subInstrumentType → sub_instrument_type（req_section 保持不变）；
+#   · 视图的 type_symbol 在表里没有同名列，按其语义取 type_secu（stock/etfs/futures 口径）；
+#   · 表**没有 flag_enable 列**：旧视图那层「启用中」筛选在表上不存在，行集合即视为
+#     可采集品种，客户端不再（也无法）拼该过滤条件；
+#   · 表保留 provider 列，本作业只采 FTMM 源，故查询里显式加 provider=eq.FTMM，
+#     与旧视图 b.provider='FTMM' 的口径一致，避免采到其它数据源的品种。
+# moomoo 请求参数列（2026-09-25 引入）——表优先策略：本地枚举未登记的品种直接用表列参数
+#   请求 moomoo（type 恒为 2=分钟线，不占表列，由 MoomooQuoteV2WebRestClient 硬编码），
+#   不再逐个外呼远程配置服务。
+#   type_secu（如 stock/etfs/futures）用于美股个股 req_section 自动补充判定
+#   （口径：region=US 且（type_symbol=stock 或 market_type=2 且 instrument_type=3）才补 "1"）。
+STATE_VIEW_COLUMNS = ("usc,name,region,market,timezone,provider,symbol,futu_symbol,"
                       "dt_last_check,dt_last_fetch,ts_latest_data,count_last_fetch,"
                       "count_fail,count_stale,weight_priority,weight_frequency,"
-                      "stockId,marketType,marketCode,instrumentType,subInstrumentType,req_section,"
-                      "type_symbol")
-# 执行日志里记录视图自带的筛选口径（自证：为什么日志里没有 flag_enable 过滤）
-STATE_VIEW_FILTER = "视图定义：flag_enable=1（z/a/b 三表）且 provider=FTMM"
+                      "stock_id,market_type,market_code,instrument_type,sub_instrument_type,"
+                      "req_section,type_secu")
+# PostgREST 过滤片段（拼在 query 尾部）：只取 FTMM 源的行
+STATE_VIEW_QUERY_FILTER = "&provider=eq.FTMM"
+# 执行日志里记录的筛选口径（自证：为什么日志里没有 flag_enable 过滤）
+STATE_VIEW_FILTER = "表筛选：provider=FTMM（新表无 flag_enable 列，行集合即可采集品种）"
 DRY_RUN = os.environ.get("POLL_DRY_RUN", "").strip().lower() in ("true", "1", "yes", "on")
 TEMP_DIR = Path(os.environ.get("POLL_TEMP_DIR", "")) if os.environ.get("POLL_TEMP_DIR", "").strip() \
     else Path(tempfile.gettempdir()) / "finv_quote_collect_poll_ftmm"
@@ -117,7 +127,8 @@ EXEC_LOG: Dict[str, object] = {
 }
 
 
-# ============ 状态读写（**读视图、写表**，PostgREST 访问见 SupabaseRestClient.py） ============
+# ============ 状态读写（**读 finv_quote_secu_ft、写 finv_quote_collect_state_poll_futu**；
+# PostgREST 访问见 SupabaseRestClient.py） ============
 def _to_int(value, default=0):
     """宽松转 int（PG 返回值可能为 None / 字符串）"""
     try:
@@ -129,7 +140,7 @@ def _to_int(value, default=0):
 def _to_weight(value, default=1):
     """宽松转调度权重（沿用旧 Config.json 的口径：1..10000 之外一律视为无效，回落 default）
 
-    视图的 weight_priority / weight_frequency 取自状态表 z 列，理论上已受表约束；
+    调度权重 weight_priority / weight_frequency 由数据源表直出，理论上已受表约束；
     这里仍按旧口径夹一道，避免脏值把 score 打成 0 或负数导致品种长期选不中。
     """
     try:
@@ -179,37 +190,39 @@ def _scrub(text):
 
 
 def load_state(client):
-    """读取状态视图（读视图、写表）：返回 (usc 列表, 状态映射)
+    """读取状态表（读 finv_quote_secu_ft、写 finv_quote_collect_state_poll_futu）：
+    返回 (usc 列表, 状态映射)
 
-    读取源为视图 STATE_VIEW（finv_quote_collect_state_poll_futu_view）——它已把
+    读取源为表 STATE_VIEW（finv_quote_secu_ft，2026-11-18 起由视图
+    finv_quote_collect_state_poll_futu_view 切换而来）——它已把
     region / market / timezone / symbol 等元数据、weight_priority / weight_frequency
-    两个调度权重、以及各状态字段拼在一行，故**本作业不再依赖任何外部配置文件**
-    （Config.json 已退出）；行身份为 STATE_KEY = usc（2026-09-25 起表主键由
-    secu_code 改为 usc）。
+    两个调度权重、以及各状态字段放在同一行，故**本作业不再依赖任何外部配置文件**
+    （Config.json 已退出）；行身份为 STATE_KEY = usc（表主键即 usc）。
 
     采集请求代码即 **usc**（它正是原 secu_code 的重命名，与旧版请求口径一致）；
-    视图另有 futu_symbol（数据源侧代码）与 symbol（= quote_market.futu_symbol），
+    表另有 futu_symbol（数据源侧代码）与 symbol（= quote_market.futu_symbol），
     本脚本不使用，如后续需改用 futu_symbol 请先与用户确认。
 
-    **不拼 flag_enable 过滤**：视图定义（security_invoker）已自行筛掉未启用品种
-    （z/a/b 三表 flag_enable='1' 且 provider='FTMM'），且该列并不在视图暴露的列里，
-    客户端硬拼会直接 400。
+    **过滤口径**：新表 finv_quote_secu_ft 没有 flag_enable 列（旧视图那层「启用中」
+    筛选在表上不存在，行集合即视为可采集品种），但保留 provider 列，故查询里显式加
+    provider=eq.FTMM（与旧视图 b.provider='FTMM' 一致），避免采到其它数据源的品种。
 
     状态映射每项含四组键：
-      · 头部元数据（视图直出）：usc / name / region / market / timezone / symbol
-      · 调度权重（视图直出）：weight_base（← weight_priority）/ weight_freq（← weight_frequency）
+      · 头部元数据（表直出）：usc / name / region / market / timezone / symbol
+      · 调度权重（表直出）：weight_base（← weight_priority）/ weight_freq（← weight_frequency）
       · 状态字段（回写表用）：time_last_check / time_last_fetch / ts_latest_data /
         count_last_fetch / count_fail / count_stale
-      · 行情请求参数（视图直出，2026-09-25 起）：view_quote_params —— 收集
-        stockId / marketType / marketCode / instrumentType / subInstrumentType / req_section
-        六列原值（字符串化、已 strip），交给 MoomooQuoteV2WebRestClient 做「视图优先」解析
-        （完整性校验与 type=2 硬编码都在客户端侧，本脚本不做业务判定）
+      · 行情请求参数（表直出，2026-09-25 起）：view_quote_params —— 收集
+        stock_id / market_type / market_code / instrument_type / sub_instrument_type /
+        req_section 六列原值（字符串化、已 strip），交给 MoomooQuoteV2WebRestClient 做
+        「表优先」解析（完整性校验与 type=2 硬编码都在客户端侧，本脚本不做业务判定）
     """
-    query_string = "select=%s&order=%s.asc" % (STATE_VIEW_COLUMNS, STATE_KEY)
+    query_string = "select=%s&order=%s.asc%s" % (
+        STATE_VIEW_COLUMNS, STATE_KEY, STATE_VIEW_QUERY_FILTER)
     text = client.query(STATE_VIEW, query_string)
     rows = json.loads(text)
     if not isinstance(rows, list):
-        raise SupabaseRestError("状态视图查询响应不是 JSON 数组")
+        raise SupabaseRestError("状态表查询响应不是 JSON 数组")
 
     usc_list: List[str] = []
     state_map: Dict[str, Dict[str, object]] = {}
@@ -219,48 +232,50 @@ def load_state(client):
             continue
         usc_list.append(usc)
         state_map[usc] = {
-            # —— MVSV 头部元数据（视图直出；name ← name_sc，同时用于日志与 # Name） ——
+            # —— MVSV 头部元数据（表直出；表列即 name，同时用于日志与 # Name） ——
             "usc": usc,
-            "name": str(row.get("name_sc") or "").strip(),
+            "name": str(row.get("name") or "").strip(),
             "region": str(row.get("region") or "").strip(),
             "market": str(row.get("market") or "").strip(),
             "timezone": str(row.get("timezone") or "").strip(),
             "symbol": str(row.get("symbol") or "").strip(),
-            # —— 调度权重（视图直出；列名对应关系见 docstring） ——
+            # —— 调度权重（表直出；列名对应关系见 docstring） ——
             "weight_base": _to_weight(row.get("weight_priority")),
             "weight_freq": _to_weight(row.get("weight_frequency")),
-            # —— 状态字段（与视图列一一对应） ——
+            # —— 状态字段（与表列一一对应） ——
             "time_last_check": row.get("dt_last_check") or "",
             "time_last_fetch": row.get("dt_last_fetch") or "",
             "ts_latest_data": _to_int(row.get("ts_latest_data")),
             "count_last_fetch": _to_int(row.get("count_last_fetch")),
             "count_fail": _to_int(row.get("count_fail")),
             "count_stale": _to_int(row.get("count_stale")),
-            # —— 行情请求参数（视图直出；列名驼峰与下划线混排，见 STATE_VIEW_COLUMNS 注释） ——
-            # 2026-09-25 起视图补充 moomoo 请求参数列，未登记本地枚举的品种（如 03081/03170/
-            # 03439）可凭视图参数直连 moomoo，不再依赖 cfgdistnet 远程配置（其上并无这些 JSON）。
+            # —— 行情请求参数（表直出；列名见 STATE_VIEW_COLUMNS 注释） ——
+            # 2026-09-25 起数据源补充 moomoo 请求参数列，未登记本地枚举的品种（如 03081/03170/
+            # 03439）可凭表列参数直连 moomoo，不再依赖 cfgdistnet 远程配置（其上并无这些 JSON）。
             # 原样字符串化传出，完整性判定与兜底回落（本地枚举→远程配置）由行情客户端负责；
             # region / type_symbol 一并带上，供客户端做美股个股 req_section 自动补充判定。
+            # 注：表里没有 type_symbol 列，按语义取 type_secu（取值口径 stock/etfs/futures）；
+            #     客户端契约仍用 type_symbol 键，故此处保持键名不变、只换取值来源。
             "view_quote_params": {
-                "stock_id": str(row.get("stockId") or "").strip(),
-                "market_type": str(row.get("marketType") or "").strip(),
-                "market_code": str(row.get("marketCode") or "").strip(),
-                "instrument_type": str(row.get("instrumentType") or "").strip(),
-                "sub_instrument_type": str(row.get("subInstrumentType") or "").strip(),
-                # 视图列名即 req_section（下划线）；空/NULL → 不传 req_section（客户端 omitempty，
+                "stock_id": str(row.get("stock_id") or "").strip(),
+                "market_type": str(row.get("market_type") or "").strip(),
+                "market_code": str(row.get("market_code") or "").strip(),
+                "instrument_type": str(row.get("instrument_type") or "").strip(),
+                "sub_instrument_type": str(row.get("sub_instrument_type") or "").strip(),
+                # 表列名即 req_section；空/NULL → 不传 req_section（客户端 omitempty，
                 # 但美股个股由客户端自动补 "1"，见 MoomooQuoteV2WebRestClient.VIEW_REGION_US）
                 "req_section": str(row.get("req_section") or "").strip(),
                 "region": str(row.get("region") or "").strip(),
-                "type_symbol": str(row.get("type_symbol") or "").strip(),
+                "type_symbol": str(row.get("type_secu") or "").strip(),
             },
         }
-    print("[状态] 从视图 %s 加载成功：%d 个品种（筛选口径由视图定义负责）"
+    print("[状态] 从表 %s 加载成功：%d 个品种（provider=FTMM，其余口径由表行集合负责）"
           % (STATE_VIEW, len(usc_list)))
     return usc_list, state_map
 
 
 def patch_state_row(client, usc, state):
-    """把单品种状态回写**表** STATE_TABLE（视图只读；dt_update 由表上触发器维护）
+    """把单品种状态回写**表** STATE_TABLE（读取源表只读；dt_update 由回写表触发器维护）
 
     过滤键为 STATE_KEY（usc，表主键）。时间列为空（从未采集/从未取到新数据）时
     不出现在载荷里，保持 NULL 原状；计数列强制夹非负，满足表上的 chk_*_nonnegative 约束。
@@ -298,10 +313,10 @@ def patch_state_row(client, usc, state):
 def normalize_market(market):
     """把市场标识归一为「时段判定口径」：交易所级的 SH/SZ/BJ 归为 A 股整体
 
-    状态视图的 market 是**交易所级**（SH/SZ/BJ），而 A 股三所的交易日时段一致，
+    状态表的 market 是**交易所级**（SH/SZ/BJ），而 A 股三所的交易日时段一致，
     故统一按 "A" 判定；其余市场标识与大写形态保持一致。
 
-    :param market: 市场标识（视图口径）
+    :param market: 市场标识（表口径）
     :return: 归一后的标识（大写）；空值返回 ""（由调用方决定兜底）
     """
     key = str(market or "").strip().upper()
@@ -368,26 +383,26 @@ def get_market_weight(market, now):
 
 # ============ 智能调度（指数退避 + 无新数据冷却 + 72h 强制采集） ============
 def resolve_weight_market(usc, state_map):
-    """取该品种用于**时段权重**的市场标识：直接取状态视图的 market
+    """取该品种用于**时段权重**的市场标识：直接取状态表的 market
 
-    2026-09-25 起权重与市场都由视图直出（Config.json 已退出），视图的 market 是
+    2026-09-25 起权重与市场都由数据源表直出（Config.json 已退出），表的 market 是
     交易所级（SH/SZ/BJ），由 get_market_weight 内部归一为 A 股口径。
 
-    :return: 市场标识；视图没给则返回 "UNKNOWN"（中性权重 5.0 兜底）
+    :return: 市场标识；表没给则返回 "UNKNOWN"（中性权重 5.0 兜底）
     """
     return (state_map.get(usc) or {}).get("market") or "UNKNOWN"
 
 
 def select_best_codes(usc_list, state_map, now, count):
-    """从状态视图取到的品种中选出本轮要采集的至多 count 个
+    """从状态表取到的品种中选出本轮要采集的至多 count 个
 
-    usc_list 为视图行身份（usc）。规则与旧版一致：
+    usc_list 为表行身份（usc）。规则与旧版一致：
       1) 强制候选（从未采集 / 时间解析失败 / 时间落在未来 / 距上次检查超 72h）
          按超时长度降序优先；
       2) 强制候选不足 count 时，其余品种按
          score = elapsed × 市场权重 × (base_w × freq_w) / 2^(fail+stale)
          降序补足（惩罚因子 = 2^(count_fail + count_stale)）。
-    其中 base_w / freq_w 取自视图的 weight_priority / weight_frequency（旧版取自
+    其中 base_w / freq_w 取自表的 weight_priority / weight_frequency（旧版取自
     Config.json，口径不变）；缺值按 1 处理。
 
     **时钟异常（时间戳落在未来）**：状态表跨数据源共享，他源可能写入超前的时间戳
@@ -534,13 +549,13 @@ def select_best_codes(usc_list, state_map, now, count):
 def collect_single(usc, meta):
     """采集单个品种：行情 API → MVSV 落盘；成功返回摘要 dict，失败返回 None
 
-    文件头部的 Symbol / Name / Region / Market / TimeZone 直接取状态视图的元数据
+    文件头部的 Symbol / Name / Region / Market / TimeZone 直接取状态表的元数据
     （2026-09-25 起不再依赖 Config.json 关联）；请求代码即 usc（原 secu_code）。
-    2026-09-25 起 meta 另含 view_quote_params（视图直出的 moomoo 请求参数），随请求
-    透传给行情客户端（视图优先策略；模式1 不消费该参数，客户端会忽略并提示）。
+    2026-09-25 起 meta 另含 view_quote_params（表直出的 moomoo 请求参数），随请求
+    透传给行情客户端（表优先策略；模式1 不消费该参数，客户端会忽略并提示）。
 
-    :param usc: 品种身份（视图主键，同时写入 # SecuCode / # USC 与落点目录）
-    :param meta: load_state 给出的视图元数据（name/region/market/timezone/symbol/
+    :param usc: 品种身份（表主键 usc，同时写入 # SecuCode / # USC 与落点目录）
+    :param meta: load_state 给出的表元数据（name/region/market/timezone/symbol/
                  view_quote_params）
     """
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -562,7 +577,7 @@ def collect_single(usc, meta):
         return None
     latest_ts = max(item.get("ts", 0) for item in minute_list) if minute_list else 0
     # V5 文件契约见 MvsvQuoteBuilder.py：头部 16 行 + 数据行；
-    # 市场元数据（Region/Market/TimeZone/Symbol）为视图直出，本脚本不再做任何推断
+    # 市场元数据（Region/Market/TimeZone/Symbol）为表直出，本脚本不再做任何推断
     content = buildMvsvContent(usc, minute_list, market=meta.get("market"),
                                region=meta.get("region"),
                                timezone=meta.get("timezone"),
@@ -720,9 +735,9 @@ def main():
     ensureConsoleUtf8()
     EXEC_LOG["start_time"] = utcNow().isoformat()
     print("======== FinvQuoteCollectPollFtmm 轮询开始 ========")
-    print("模式: %s | 状态视图: %s | 状态表: %s | POLL_COUNT=%d"
+    print("模式: %s | 状态数据源: %s | 状态回写表: %s | POLL_COUNT=%d"
           % ("dry_run 演练" if DRY_RUN else "正常", STATE_VIEW, STATE_TABLE, POLL_COUNT))
-    print("视图筛选口径: %s（客户端不再另加过滤）" % STATE_VIEW_FILTER)
+    print("数据源筛选口径: %s" % STATE_VIEW_FILTER)
     print("数据落点: %s/%s @ %s（脚本内常量锁定）" % (GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH))
 
     # 凭据：Supabase 由客户端从环境变量解析（缺失抛 ValueError，不打印取值）
@@ -756,12 +771,12 @@ def main():
         usc_list, state_map = load_state(client)
     except Exception as e:
         err = _one_line(e)          # PostgREST 的错误响应可能多行且很长，压成单行再落日志
-        print("❌ 状态视图读取失败: %s" % err)
+        print("❌ 状态表读取失败: %s" % err)
         EXEC_LOG["errors"].append("state_load: %s" % err)
         return 1
 
     if not usc_list:
-        print("状态视图 %s 中没有可采集的品种，无事可做" % STATE_VIEW)
+        print("状态表 %s 中没有可采集的品种，无事可做" % STATE_VIEW)
         return 0
 
     now = nowBeijing()
