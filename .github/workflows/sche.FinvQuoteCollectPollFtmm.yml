@@ -45,7 +45,7 @@
 #   日志    {LOG_DIR}/{yyyyMMdd_HHmmss}.log（一次运行一个文件，保留时分秒）
 #
 # 必需 Secrets / Variables：
-#   SUPABASE_PROJECT_REF / SUPABASE_KEY  Supabase 凭据（读状态视图 / 回写状态表）
+#   SUPABASE_PROJECT_REF / SUPABASE_KEY  Supabase 凭据（读状态表 / 回写状态表）
 #   GIT_COMMIT_TOKEN                     GitHub 令牌（需 ACANX/Distribution 的
 #                                        contents:write 权限）
 #   LAMBDA_FTMM_API_BASE                 行情 API 端点（**仅模式1 必填**；secrets 优先回落
@@ -54,7 +54,9 @@
 #                                        （旧名 API_BASE 仍兼容，但不再作为主用）
 #
 # 可选环境变量（缺省值已写在脚本常量里，一般无需配置）：
-#   POLL_STATE_VIEW  状态读取源（缺省 finv_quote_collect_state_poll_futu_view）
+#   POLL_STATE_VIEW  状态读取源（缺省 finv_quote_secu_ft；2026-11-18 起由视图
+#                    finv_quote_collect_state_poll_futu_view 换表，需回滚时把该变量
+#                    显式设为视图名即可）
 #   POLL_STATE_TABLE 状态回写目标（缺省 finv_quote_collect_state_poll_futu）
 #
 # ⚠️ 模式2（QUOTE_FETCH_MODE = MODE_MOOMOO）的上游限流风险：2026-09-25 实测同 IP **连发约
