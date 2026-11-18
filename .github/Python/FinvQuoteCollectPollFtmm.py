@@ -42,8 +42,9 @@ LOG_DIR = "Data/Finv/SecurityQuoteV5/ExecLog"    # 执行日志落点目录
 POLL_COUNT = 5
 FORCE_FETCH_INTERVAL = 72 * 3600          # 距上次检查超过 72 小时强制采集（秒）
 # 时钟异常容忍（秒）：状态列时间戳比「本次运行时刻」超前超过该阈值，即视为脏值。
-# 背景（2026-09-25 实测定案）：状态表 finv_quote_collect_state_poll_futu 是**跨数据源共享**
-# 的（Futu 侧作业也在写同一张表，证据：NVDA/688050 等非 FTMM 行与本作业的 FTMM 行出现过
+# 背景（2026-09-25 实测定案，2026-11-18 换表后仍适用）：状态表是**跨数据源共享**的
+# （当时为 finv_quote_collect_state_poll_futu，现为 finv_quote_secu_ft——同样带 provider
+# 列；证据：NVDA/688050 等非 FTMM 行与本作业的 FTMM 行出现过
 # 微秒级完全相同的时间戳，且 GCMain 的 dt_last_check 实测落在未来 ~7 分钟）。一旦这种
 # 「未来时间戳」落到本作业读到的品种上，会同时造成两处失效：
 #   · 打分侧 elapsed 为负 → score 为负 → 该品种永远排在最后，选不中；
@@ -53,8 +54,9 @@ FORCE_FETCH_INTERVAL = 72 * 3600          # 距上次检查超过 72 小时强�
 # 让异常尽快自愈；正常 NTP 抖动远小于此，不会误触发。
 CLOCK_SKEW_TOLERANCE = 60
 
-# ============ remark 回写（表上 2026-09-25 新增列，标记最后采集成功/失败） ============
-# 状态表 finv_quote_collect_state_poll_futu 的 remark 列（文本，可空）：每次回写顺带更新为
+# ============ remark 回写（2026-09-25 新增列，标记最后采集成功/失败） ============
+# 状态表（现为 finv_quote_secu_ft，2026-11-18 已补该列）的 remark 列（文本，可空）：
+# 每次回写顺带更新为
 # 「结果|yyyyMMddHHmmss」（北京时间，取自本次运行的 now，与 dt_last_check 同一时刻）。
 #   · 采集成功（拿到行情，无论有无新数据）→ "采集成功|20260925214155"
 #   · 采集失败                            → "采集失败|20260925214155"
@@ -76,9 +78,11 @@ GIT_COMMIT_TOKEN = os.environ.get("GIT_COMMIT_TOKEN", "").strip()
 # 常量名与 POLL_STATE_VIEW 环境变量保留原样，便于必要时一键回滚。
 STATE_VIEW = os.environ.get("POLL_STATE_VIEW",
                             "finv_quote_secu_ft").strip()
-# 状态回写目标 = 表（读取源只读，更新一律落本表）
-STATE_TABLE = os.environ.get("POLL_STATE_TABLE", "finv_quote_collect_state_poll_futu").strip()
-# 行身份列：2026-09-25 起主键由 secu_code 改为 usc（读源表与回写表同名同值）
+# 状态回写目标 = 表（2026-11-18 起读、写同为 finv_quote_secu_ft；该表已补 remark 列，
+# 故不再是「读表 A、写表 B」的双通道，回写直接落在读取源同一行）
+# POLL_STATE_TABLE 覆盖能力保留，便于需要时回落到旧的独立状态表
+STATE_TABLE = os.environ.get("POLL_STATE_TABLE", "finv_quote_secu_ft").strip()
+# 行身份列：2026-09-25 起主键由 secu_code 改为 usc（读、写同一张表，主键即 usc）
 STATE_KEY = "usc"
 # 数据源查询的列清单——**必须与表列严格对齐**（PostgREST 对不存在的列直接 400）。
 # 2026-11-18 起读取源为表 public.finv_quote_secu_ft（替代视图
@@ -87,7 +91,7 @@ STATE_KEY = "usc"
 #   · 驼峰 → 下划线：stockId → stock_id、marketType → market_type、
 #     marketCode → market_code、instrumentType → instrument_type、
 #     subInstrumentType → sub_instrument_type（req_section 保持不变）；
-#   · 视图的 type_symbol 在表里没有同名列，按其语义取 type_secu（stock/etfs/futures 口径）；
+#   · 视图的 type_symbol 对应新表新增列 instrument（stock/etfs/futures 口径）；
 #   · 表已补 flag_enable（整型）：只采集启用中的品种，查询里显式加 flag_enable=eq.1
 #     （与旧视图三表 flag_enable='1' 的口径一致）；该列只用于过滤，不必出现在 select 里；
 #   · 表保留 provider 列，本作业只采 FTMM 源，故查询里显式加 provider=eq.FTMM，
@@ -95,13 +99,13 @@ STATE_KEY = "usc"
 # moomoo 请求参数列（2026-09-25 引入）——表优先策略：本地枚举未登记的品种直接用表列参数
 #   请求 moomoo（type 恒为 2=分钟线，不占表列，由 MoomooQuoteV2WebRestClient 硬编码），
 #   不再逐个外呼远程配置服务。
-#   type_secu（如 stock/etfs/futures）用于美股个股 req_section 自动补充判定
+#   instrument（如 stock/etfs/futures）用于美股个股 req_section 自动补充判定
 #   （口径：region=US 且（type_symbol=stock 或 market_type=2 且 instrument_type=3）才补 "1"）。
 STATE_VIEW_COLUMNS = ("usc,name,region,market,timezone,provider,symbol,futu_symbol,"
                       "dt_last_check,dt_last_fetch,ts_latest_data,count_last_fetch,"
                       "count_fail,count_stale,weight_priority,weight_frequency,"
                       "stock_id,market_type,market_code,instrument_type,sub_instrument_type,"
-                      "req_section,type_secu")
+                      "req_section,instrument")
 # PostgREST 过滤片段（拼在 query 尾部）：只取 FTMM 源、且启用中的行
 STATE_VIEW_QUERY_FILTER = "&provider=eq.FTMM&flag_enable=eq.1"
 # 执行日志里记录的筛选口径（与旧视图口径一致，供日志自证）
@@ -127,8 +131,8 @@ EXEC_LOG: Dict[str, object] = {
 }
 
 
-# ============ 状态读写（**读 finv_quote_secu_ft、写 finv_quote_collect_state_poll_futu**；
-# PostgREST 访问见 SupabaseRestClient.py） ============
+# ============ 状态读写（**读、写同一张表 finv_quote_secu_ft**；PostgREST 访问见
+# SupabaseRestClient.py） ============
 def _to_int(value, default=0):
     """宽松转 int（PG 返回值可能为 None / 字符串）"""
     try:
@@ -190,8 +194,7 @@ def _scrub(text):
 
 
 def load_state(client):
-    """读取状态表（读 finv_quote_secu_ft、写 finv_quote_collect_state_poll_futu）：
-    返回 (usc 列表, 状态映射)
+    """读取状态表 finv_quote_secu_ft：返回 (usc 列表, 状态映射)
 
     读取源为表 STATE_VIEW（finv_quote_secu_ft，2026-11-18 起由视图
     finv_quote_collect_state_poll_futu_view 切换而来）——它已把
@@ -254,7 +257,7 @@ def load_state(client):
             # 03439）可凭表列参数直连 moomoo，不再依赖 cfgdistnet 远程配置（其上并无这些 JSON）。
             # 原样字符串化传出，完整性判定与兜底回落（本地枚举→远程配置）由行情客户端负责；
             # region / type_symbol 一并带上，供客户端做美股个股 req_section 自动补充判定。
-            # 注：表里没有 type_symbol 列，按语义取 type_secu（取值口径 stock/etfs/futures）；
+            # 注：表列名是 instrument（视图时代叫 type_symbol），取值口径 stock/etfs/futures；
             #     客户端契约仍用 type_symbol 键，故此处保持键名不变、只换取值来源。
             "view_quote_params": {
                 "stock_id": str(row.get("stock_id") or "").strip(),
@@ -266,7 +269,7 @@ def load_state(client):
                 # 但美股个股由客户端自动补 "1"，见 MoomooQuoteV2WebRestClient.VIEW_REGION_US）
                 "req_section": str(row.get("req_section") or "").strip(),
                 "region": str(row.get("region") or "").strip(),
-                "type_symbol": str(row.get("type_secu") or "").strip(),
+                "type_symbol": str(row.get("instrument") or "").strip(),
             },
         }
     print("[状态] 从表 %s 加载成功：%d 个品种（provider=FTMM 且 flag_enable=1）"
@@ -275,7 +278,8 @@ def load_state(client):
 
 
 def patch_state_row(client, usc, state):
-    """把单品种状态回写**表** STATE_TABLE（读取源表只读；dt_update 由回写表触发器维护）
+    """把单品种状态回写**表** STATE_TABLE（2026-11-18 起读写同为 finv_quote_secu_ft；
+    dt_update / gmt_update 由表默认值或触发器维护，本脚本不写这两个列）
 
     过滤键为 STATE_KEY（usc，表主键）。时间列为空（从未采集/从未取到新数据）时
     不出现在载荷里，保持 NULL 原状；计数列强制夹非负，满足表上的 chk_*_nonnegative 约束。
