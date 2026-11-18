@@ -68,12 +68,12 @@ moomoo（富途）官方 quote-v2-web 接口**拉取证券分钟行情（5 日�
     1002 远程配置获取失败（非 404）；1003 上游 code=500（参数错误）；1004 上游其它非 0 码
     1005 内部错误（缺少必要参数）；1006 远程配置 404（证券暂不支持）；1007 远程配置超时
 
-四、参数获取策略（2026-09-25 起为三级：视图参数 → 本地枚举 → 远程配置）
+四、参数获取策略（2026-09-25 起为三级：表参数 → 本地枚举 → 远程配置）
 ----------------------------------------------------------------------------------------
-    0) 视图参数（调用方经 view_params 传入，来自状态视图
-       finv_quote_collect_state_poll_futu_view 直出的 stockId / marketType / marketCode /
-       instrumentType / subInstrumentType / req_section 列）—— 完整即直接采用，不再外呼；
-       type（分钟线类型）恒为 "2"，不占视图列，由本文件硬编码；
+    0) 表参数（调用方经 view_params 传入，来自状态表
+       finv_quote_secu_ft 的 stock_id / market_type / market_code /
+       instrument_type / sub_instrument_type / req_section 列）—— 完整即直接采用，不再外呼；
+       type（分钟线类型）恒为 "2"，不占表列，由本文件硬编码；
        任一必填项缺失则回落下一级（打日志提示，见 buildViewSecurityParams）；
     1) 本地枚举 SECURITY_CONFIGS（对应 Go 的 stock.go）—— 命中即用，最快；
     2) 远程配置 https://cfgdistnet.pages.dev/Quote/Futu/{secuCode}.json 的 queryParams 节点，
@@ -214,7 +214,7 @@ PARAM_ORDER = (PARAM_STOCK_ID, PARAM_MARKET_TYPE, PARAM_TYPE, PARAM_MARKET_CODE,
 # 无条件写入 URL 的参数（Go 里这 6 个不做 omitempty；只有 req_section 是条件写入）
 PARAM_ALWAYS = (PARAM_STOCK_ID, PARAM_MARKET_TYPE, PARAM_TYPE, PARAM_MARKET_CODE,
                 PARAM_INSTRUMENT_TYPE, PARAM_SUB_INSTRUMENT_TYPE)
-# 分钟线类型（视图参数策略下 type 恒为该值；本地枚举/远程配置同样取 2，见模块文档「四」）
+# 分钟线类型（表参数策略下 type 恒为该值；本地枚举/远程配置同样取 2，见模块文档「四」）
 LINE_TYPE_MINUTE = "2"
 
 
@@ -574,36 +574,36 @@ def _load_remote_config(secu_code):
     return params, None
 
 
-# ============ 视图参数（三级策略的第 0 级，2026-09-25 起） ============
-# 视图参数 dict 的必填键清单（缺一即视为不完整，回落本地枚举→远程配置）。
+# ============ 表参数（三级策略的第 0 级，2026-09-25 起） ============
+# 表参数 dict 的必填键清单（缺一即视为不完整，回落本地枚举→远程配置）。
 # 键名与采集作业 FinvQuoteCollectPollFtmm.load_state 的 view_quote_params 一一对应，
-# 取自状态视图 finv_quote_collect_state_poll_futu_view 直出列
-# （stockId / marketType / marketCode / instrumentType / subInstrumentType / req_section）。
+# 取自状态表 finv_quote_secu_ft 的列
+# （stock_id / market_type / market_code / instrument_type / sub_instrument_type / req_section）。
 VIEW_PARAM_REQUIRED = ("stock_id", "market_type", "market_code",
                        "instrument_type", "sub_instrument_type")
 # —— req_section 的美股个股自动补充口径（2026-09-25 用户定案 + 实测核对） ——
-# 仅 region=US 且（type_symbol='stock' 或 (marketType='2' 且 instrumentType='3')）的记录
-# 才需要 req_section='1'。视图实测：NVDA/SPCX 两条都命中（现值 '1'）；美股 ETF
-# （type_symbol='etfs'、instrumentType='4'）与期货（'futures'、'9'）均不命中，与远程配置
+# 仅 region=US 且（type_symbol='stock' 或 (market_type='2' 且 instrument_type='3')）的记录
+# 才需要 req_section='1'。表实测：NVDA/SPCX 两条都命中（现值 '1'）；美股 ETF
+# （type_symbol='etfs'、instrument_type='4'）与期货（'futures'、'9'）均不命中，与远程配置
 # GLD 返回 reqSection:null 一致。「美股一律补 1」不成立。双条件取 OR 是为了容错：
 # type_symbol 万一漏标时，参数组合（2+3）仍能兜住美股个股。
 VIEW_REGION_US = "US"
-VIEW_TYPE_SYMBOL_STOCK = "stock"          # 视图取值本身小写，比较时仍统一小写兜底
+VIEW_TYPE_SYMBOL_STOCK = "stock"          # 表取值本身小写，比较时仍统一小写兜底
 VIEW_REQ_SECTION_US_STOCK = "1"
 
 
 def buildViewSecurityParams(view_params):
-    """把状态视图直出的行情请求参数转换为按签名顺序排列的 moomoo 请求参数
+    """把状态表直出的行情请求参数转换为按签名顺序排列的 moomoo 请求参数
 
-    视图优先策略的入口：五个必填项（stock_id / market_type / market_code /
+    表优先策略的入口：五个必填项（stock_id / market_type / market_code /
     instrument_type / sub_instrument_type）**全部非空**才算完整，任一缺失返回 None
     （由 resolveSecurityParams 打提示并回落）。type 恒为 LINE_TYPE_MINUTE（"2"，
-    分钟线），不占视图列、在此硬编码；req_section 空/缺失则不写入（同 Go 的 omitempty），
+    分钟线），不占表列、在此硬编码；req_section 空/缺失则不写入（同 Go 的 omitempty），
     但「美股个股」（view_params 含 region=US 且（type_symbol=stock 或
-    marketType=2 且 instrumentType=3））例外——req_section 为空时自动补
+    market_type=2 且 instrument_type=3））例外——req_section 为空时自动补
     VIEW_REQ_SECTION_US_STOCK（"1"，口径依据见 VIEW_REGION_US 注释）。
 
-    :param view_params: 视图参数 dict（键见 VIEW_PARAM_REQUIRED 与
+    :param view_params: 表参数 dict（键见 VIEW_PARAM_REQUIRED 与
                         "req_section" / "region" / "type_symbol"，后两者仅用于美股个股补充）；
                         None 或非 dict 一律返回 None（旧调用形态不受影响）
     :return: 按签名顺序排列的参数 dict（不含 `_` 时间戳）；不完整/未提供返回 None
@@ -626,8 +626,8 @@ def buildViewSecurityParams(view_params):
                                 and values["instrument_type"] == "3")))
         if is_us_stock:
             req_section = VIEW_REQ_SECTION_US_STOCK
-            print("[模式2] 视图 req_section 为空，按美股个股自动补 %s（region=%s type_symbol=%s "
-                  "marketType=%s instrumentType=%s）"
+            print("[模式2] 表 req_section 为空，按美股个股自动补 %s（region=%s type_symbol=%s "
+                  "market_type=%s instrument_type=%s）"
                   % (req_section, region, type_symbol or "(空)",
                      values["market_type"], values["instrument_type"]))
     params = {
@@ -645,10 +645,10 @@ def buildViewSecurityParams(view_params):
 
 
 def resolveSecurityParams(secu_code, view_params=None):
-    """解析证券参数（三级策略：视图参数 → 本地枚举 → 远程配置）
+    """解析证券参数（三级策略：表参数 → 本地枚举 → 远程配置）
 
     :param secu_code: 证券代码（如 HSI / 159937 / NVDA）
-    :param view_params: 状态视图直出的行情请求参数（可选；键为
+    :param view_params: 状态表直出的行情请求参数（可选；键为
               stock_id / market_type / market_code / instrument_type / sub_instrument_type /
               req_section，值均为字符串，来自采集作业的 load_state → view_quote_params）。
               完整（五个必填项非空）则**最高优先**直接采用；不完整时打提示并回落
@@ -659,20 +659,20 @@ def resolveSecurityParams(secu_code, view_params=None):
     code = str(secu_code or "").strip()
     if not code:
         return None, "[%d] 缺少必要参数: secuCode" % ERR_CODE_INTERNAL
-    # —— 第 0 级：视图参数（2026-09-25 起，视图优先策略） ——
+    # —— 第 0 级：表参数（2026-09-25 起，表优先策略） ——
     view_config = buildViewSecurityParams(view_params)
     if view_config is not None:
-        print("[模式2] 视图参数命中: secuCode=%s stockId=%s marketType=%s marketCode=%s "
-              "instrumentType=%s subInstrumentType=%s reqSection=%s"
+        print("[模式2] 表参数命中: secuCode=%s stock_id=%s market_type=%s market_code=%s "
+              "instrument_type=%s sub_instrument_type=%s reqSection=%s"
               % (code, view_config[PARAM_STOCK_ID], view_config[PARAM_MARKET_TYPE],
                  view_config[PARAM_MARKET_CODE], view_config[PARAM_INSTRUMENT_TYPE],
                  view_config[PARAM_SUB_INSTRUMENT_TYPE],
                  view_config.get(PARAM_REQ_SECTION) or "(无)"))
         return view_config, None
     if view_params is not None:
-        # 调用方明确给了视图参数但不完整：说明该品种在视图里未登记全，回落并提示
+        # 调用方明确给了表参数但不完整：说明该品种在表里未登记全，回落并提示
         missing = [key for key in VIEW_PARAM_REQUIRED if not str(view_params.get(key) or "").strip()]
-        print("[模式2] 视图参数不完整（缺 %s），回落本地枚举→远程配置: secuCode=%s"
+        print("[模式2] 表参数不完整（缺 %s），回落本地枚举→远程配置: secuCode=%s"
               % (",".join(missing), code))
     config = SECURITY_CONFIGS.get(code)
     if config is not None:
@@ -823,7 +823,7 @@ def fetchFiveDayMinuteQuote(secu_code, timeout=DEFAULT_TIMEOUT, view_params=None
 
     :param secu_code: 证券代码（如 HSI / 159937 / NVDA）
     :param timeout: 单次上游请求超时秒数，默认 15（与 Go 一致）
-    :param view_params: 状态视图直出的行情请求参数（可选，见 resolveSecurityParams）；
+    :param view_params: 状态表直出的行情请求参数（可选，见 resolveSecurityParams）；
                         完整则最高优先采用，不完整/未提供回落既有解析链路
     :return: 成功 → {"code":1,"message":"OK","data":{...}}；
              失败 → None（诊断信息已 print，错误码见模块文档「三」）
