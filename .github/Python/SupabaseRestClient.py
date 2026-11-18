@@ -43,21 +43,22 @@ fromEnv() 即上述环境变量路径；两者任一缺失抛 ValueError（不�
     except ValueError as e:
         print("缺少凭据:", e)
 
-    # 读：从视图取（视图可直出元数据列与状态列；主键 usc）
+    # 读：元数据列与状态列同一张表直出（主键 usc）；只取启用中的 FTMM 品种
     rows = json.loads(client.query(
-        "finv_quote_collect_state_poll_futu_view",
-        "select=usc,region,market,timezone,symbol,dt_last_check&order=usc.asc"))
-    # 写：一律落表（视图只读）
-    client.patch("finv_quote_collect_state_poll_futu",
+        "finv_quote_secu_ft",
+        "select=usc,name,region,market,timezone,symbol,dt_last_check"
+        "&order=usc.asc&provider=eq.FTMM&flag_enable=eq.1"))
+    # 写：同一张表按主键原地更新
+    client.patch("finv_quote_secu_ft",
                  eqFilter("usc", "159937"),
-                 {"count_fail": 0})
+                 {"count_fail": 0, "remark": "采集成功|20261118160000"})
 
 五、注意事项
 ----------------------------------------------------------------------------------------
     - PostgREST 默认单页最多返回 1000 行，行数超过需调用方自行分页；
-    - **视图（读）与表（写）是两条通道**：视图列由视图定义决定，查询里列到不存在的列
-      会直接 400，故调用方的 select 列清单必须与视图定义严格对齐（例如视图不暴露
-      flag_enable 时不要拼该过滤条件）；
+    - **读写可以落在同一张表**（如 finv_quote_secu_ft）：列清单必须与**表列**严格对齐，
+      查询里列到不存在的列会直接 400；只用于过滤的列（如 provider / flag_enable）
+      不必出现在 select 里；
     - 响应中的 timestamptz 为 **UTC 偏移的 ISO 字符串**，解析请用 DateTimeUtil.parseDt；
     - 日志中的项目引用一律遮蔽为 ***，密钥不落任何输出。
 
