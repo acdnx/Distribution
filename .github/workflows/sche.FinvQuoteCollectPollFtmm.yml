@@ -57,7 +57,8 @@
 #   POLL_STATE_VIEW  状态读取源（缺省 finv_quote_secu_ft；2026-11-18 起由视图
 #                    finv_quote_collect_state_poll_futu_view 换表，需回滚时把该变量
 #                    显式设为视图名即可）
-#   POLL_STATE_TABLE 状态回写目标（缺省 finv_quote_collect_state_poll_futu）
+#   POLL_STATE_TABLE 状态回写目标（缺省 finv_quote_secu_ft，与读取源同一张表；
+#                    需要落回旧的独立状态表时显式设 finv_quote_collect_state_poll_futu）
 #
 # ⚠️ 模式2（QUOTE_FETCH_MODE = MODE_MOOMOO）的上游限流风险：2026-09-25 实测同 IP **连发约
 #    7 次**即触发 moomoo 上游限流（HTTP 200 + HTML 限流页），且**持续约 12 分钟**；本作业约
